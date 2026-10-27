@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/HappyDocker/HappyDocker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/HappyDocker.Tests/HappyDocker.Tests.csproj" />
+  </Folder>
+</Solution>
