@@ -105,7 +105,7 @@ public sealed record ImageReference(
         return this;
     }
 
-    private static bool IsSupportedDigest(string value)
+    internal static bool IsSupportedDigest(string value)
     {
         int colon = value.IndexOf(':');
         if (colon < 0) return false;

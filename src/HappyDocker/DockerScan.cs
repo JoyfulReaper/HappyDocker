@@ -1,22 +1,34 @@
 namespace HappyDocker;
 
 public sealed record DockerCommandResult(int ExitCode, string Stdout, string Stderr);
+public sealed record DockerInventory(int ExitCode, List<DockerInspectRow> Containers, List<DockerImageRow> Images);
 
 public static class DockerScan
 {
     public static async Task<int> RunAsync(
         Func<string[], Task<DockerCommandResult>> runDocker, TextWriter output, TextWriter error)
     {
+        DockerInventory inventory = await ReadAsync(runDocker, error);
+        if (inventory.Containers.Count > 0)
+            WriteReport(inventory.Containers, inventory.Images, output, error);
+        else if (inventory.ExitCode == 0)
+            output.WriteLine("No running containers found.");
+        return inventory.ExitCode;
+    }
+
+    public static async Task<DockerInventory> ReadAsync(
+        Func<string[], Task<DockerCommandResult>> runDocker, TextWriter error)
+    {
         DockerCommandResult ps = await runDocker(["ps", "--format", "{{json .}}"]);
-        if (ps.ExitCode != 0) { error.WriteLine(ps.Stderr); return ps.ExitCode; }
+        if (ps.ExitCode != 0) { error.WriteLine(ps.Stderr); return new(ps.ExitCode, [], []); }
         var containers = DockerJsonLines.Parse<DockerPsRow>(ps.Stdout);
-        if (containers.Count == 0) { output.WriteLine("No running containers found."); return 0; }
+        if (containers.Count == 0) return new(0, [], []);
 
         const string inspectFormat =
             """{"Id":{{json .Id}},"Name":{{json .Name}},"ImageId":{{json .Image}},"ConfiguredImage":{{json .Config.Image}},"Platform":{{json .Platform}}}""";
         DockerCommandResult inspect = await runDocker(["inspect", "--type", "container", "--format", inspectFormat,
             .. containers.Select(c => c.ID)]);
-        if (inspect.ExitCode != 0) { error.WriteLine(inspect.Stderr); return inspect.ExitCode; }
+        if (inspect.ExitCode != 0) { error.WriteLine(inspect.Stderr); return new(inspect.ExitCode, [], []); }
         var inspected = DockerJsonLines.Parse<DockerInspectRow>(inspect.Stdout);
 
         const string imageFormat =
@@ -27,25 +39,13 @@ public static class DockerScan
             : await runDocker(["image", "inspect", "--format", imageFormat, .. imageIds]);
         // Docker can return partial metadata when an image disappears during the scan.
         if (images.ExitCode != 0) error.WriteLine(images.Stderr);
-        WriteReport(inspected, DockerJsonLines.Parse<DockerImageRow>(images.Stdout), output, error);
-        return images.ExitCode;
+        return new(images.ExitCode, inspected, DockerJsonLines.Parse<DockerImageRow>(images.Stdout));
     }
 
     public static void WriteReport(IEnumerable<DockerInspectRow> containers, IEnumerable<DockerImageRow> images,
         TextWriter output, TextWriter error)
     {
-        var imagesById = new Dictionary<string, DockerImageRow>(StringComparer.Ordinal);
-        foreach (var group in images.Where(i => !string.IsNullOrWhiteSpace(i.Id)).GroupBy(i => i.Id!, StringComparer.Ordinal))
-        {
-            DockerImageRow first = group.First();
-            if (group.Any(i => i.Os != first.Os || i.Architecture != first.Architecture || i.Variant != first.Variant
-                || !DigestSet(i).SequenceEqual(DigestSet(first))))
-            {
-                error.WriteLine($"Conflicting image metadata for {group.Key}; reporting metadata as unknown.");
-                continue;
-            }
-            imagesById.Add(group.Key, first);
-        }
+        Dictionary<string, DockerImageRow> imagesById = IndexImages(images, error);
 
         output.WriteLine($"{"CONTAINER",-24} {"PLATFORM",-18} {"IMAGE",-58} IMAGE ID");
         foreach (DockerInspectRow container in containers)
@@ -61,6 +61,24 @@ public static class DockerScan
             output.WriteLine($"  Reference: {reference.Kind}{(reference.IsDigestPinned ? " (digest-pinned)" : "")}; {reference.Normalized ?? "<none>"}");
             output.WriteLine($"  {reference.Reason}");
         }
+    }
+
+    internal static Dictionary<string, DockerImageRow> IndexImages(IEnumerable<DockerImageRow> images, TextWriter error)
+    {
+        var imagesById = new Dictionary<string, DockerImageRow>(StringComparer.Ordinal);
+        foreach (var group in images.Where(i => !string.IsNullOrWhiteSpace(i.Id)).GroupBy(i => i.Id!, StringComparer.Ordinal))
+        {
+            DockerImageRow first = group.First();
+            if (group.Any(i => i.Os != first.Os || i.Architecture != first.Architecture || i.Variant != first.Variant
+                || !DigestSet(i).SequenceEqual(DigestSet(first))))
+            {
+                error.WriteLine($"Conflicting image metadata for {group.Key}; reporting metadata as unknown.");
+                continue;
+            }
+            imagesById.Add(group.Key, first);
+        }
+
+        return imagesById;
     }
 
     private static IEnumerable<string> DigestSet(DockerImageRow image) =>

@@ -3,15 +3,18 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 
-if (args.Length != 1 || args[0] != "scan")
+if (args.Length != 1 || args[0] is not ("scan" or "check"))
 {
-    Console.Error.WriteLine("Usage: happydocker scan");
+    Console.Error.WriteLine("Usage: happydocker scan|check");
     return 1;
 }
 
 try
 {
-    return await DockerScan.RunAsync(arguments => RunDockerAsync(arguments), Console.Out, Console.Error);
+    if (args[0] == "scan")
+        return await DockerScan.RunAsync(arguments => RunDockerAsync(arguments), Console.Out, Console.Error);
+    using var registry = new RegistryClient();
+    return await DockerCheck.RunAsync(arguments => RunDockerAsync(arguments), new RegistryUpdateChecker(registry), Console.Out, Console.Error);
 }
 catch (JsonException exception)
 {

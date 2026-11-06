@@ -20,6 +20,8 @@ HappyDocker should provide **actionable awareness, not unattended deployment**.
 
 ## Milestone 1 — inventory (WSIWOT #274)
 
+**Implemented:** local read-only `scan`, reference normalization/classification, graceful image metadata handling, and fixture-based tests. Validation against Clanker remains a manual follow-up; no SSH access is assumed.
+
 - Choose a Docker API access pattern; start as a locally invoked CLI rather than a privileged always-on service.
 - List running containers and inspect their image metadata.
 - Normalize references: `ubuntu`, `library/nats:2.14.8-alpine`, `ghcr.io/org/name:tag`, `name@sha256:...`, etc.
@@ -29,15 +31,22 @@ HappyDocker should provide **actionable awareness, not unattended deployment**.
 
 ## Milestone 2 — registry updates (WSIWOT #275–276)
 
-- Support Docker Hub and GHCR, including token-auth challenges, rate limits, and transient failures.
-- Compare appropriate platform-specific image manifest digests, not merely tag strings.
-- **Mutable-tag update:** alert when the deployed image differs from the image currently published under the configured tag.
-- **Newer-version suggestion:** where safe to infer from a recognized tag family (e.g. `2.14.3-alpine` -> `2.14.8-alpine`), suggest a candidate but never assume semantic version tags exist or that a higher version is compatible.
-- Be conservative with `latest`, `dev`, moving major tags, prereleases, and variant suffixes.
-- Treat digest-pinned images as intentionally pinned for automatic update suggestions; retain them for vulnerability scanning.
-- Distinguish `update available`, `candidate newer tag`, `up-to-date`, `unknown`, and `not comparable`.
+**First stage implemented:** `check` compares only each running container's configured mutable tag on Docker Hub or GHCR. Registry HTTP communication is separate from Docker inventory. Anonymous bearer authentication, bounded HTTPS redirects, request deadlines, response limits, and rate-limit cooldowns are implemented with `HttpClient` and mocked HTTP tests.
 
-**Definition of done:** A test fixture models the NATS situation: the `2.14.3-alpine` tag is unchanged while a patched `2.14.8-alpine` tag exists. The tool must not report that the old tag has been updated, but may suggest the newer compatible candidate with a qualification.
+The comparison resolves both the deployed repository digest and the current tag to an exact platform manifest, binds the deployed manifest's config digest to Docker's image ID, and validates changed image config/platform metadata. An index changing only for another architecture does not imply an update. Digest pins and ambiguous/local-only references are skipped. Missing or inconsistent identity/platform information produces `Unknown`.
+
+Reports distinguish up to date, update available, unknown/insufficient metadata, unsupported registry, authentication required, registry unavailable, and skipped references. Only supported registry/auth endpoints and documented config CDN redirects are allowed; bearer tokens never cross hosts. Private registry credentials, persistent state, scheduling, and newer-version discovery remain out of scope for this stage. See [README](../README.md#comparison-rules-and-limits) for behavior and limitations.
+
+Remaining milestone work:
+
+- Validate the implemented Docker Hub/GHCR comparisons against real containers, including registry and platform failure cases.
+- Consider explicit credential support and additional documented CDN endpoints if needed for deployed workloads; preserve the supported-host boundary.
+- **Newer-version suggestion:** where safe to infer from a recognized tag family (e.g. `2.14.3-alpine` -> `2.14.8-alpine`), suggest a candidate but never assume semantic version tags exist or that a higher version is compatible.
+- Keep any future version suggestions conservative with `latest`, `dev`, moving major tags, prereleases, and variant suffixes.
+- Retain digest-pinned images for future vulnerability scanning while continuing to skip mutable-tag comparisons.
+- Add a distinct `candidate newer tag` result only when newer-version discovery is implemented.
+
+**First-stage regression fixture:** The NATS `2.14.3-alpine` tag is unchanged while a patched `2.14.8-alpine` tag exists elsewhere. The implemented checker reports up to date, never lists tags, and never requests the newer tag. Qualified newer-version suggestions remain future work.
 
 ## Milestone 3 — vulnerabilities (new task to add to WSIWOT)
 
@@ -117,4 +126,4 @@ Interfaces should be testable independently. Early development uses mocked regis
 
 ## Next session (smallest worthwhile coding slice)
 
-The read-only Docker inventory CLI and image-reference parsing are implemented; see [README](../README.md) for current behavior and test instructions. Validate the inventory against Clanker's running containers before beginning registry update checks.
+The read-only inventory and first-stage registry comparisons are implemented; see [README](../README.md) for usage, limitations, and test instructions. Validate `scan` and `check` against a locally accessible Docker daemon and representative Docker Hub/GHCR containers before expanding scope. A Docker CLI is installed in the development environment, but its Docker Desktop Linux engine pipe was absent during this implementation, so the real-container smoke test could not run. No images were pulled and no containers were changed. Clanker validation remains a separate manual follow-up.
