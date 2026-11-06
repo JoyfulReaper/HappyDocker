@@ -1,8 +1,8 @@
 ﻿namespace HappyDocker;
 
 public sealed record DockerImageRow(
-    string Id,
-    string Os,
-    string Architecture,
-    string? Variant,
-    string[]? RepoDigests);
+    string? Id = null,
+    string? Os = null,
+    string? Architecture = null,
+    string? Variant = null,
+    string?[]? RepoDigests = null);

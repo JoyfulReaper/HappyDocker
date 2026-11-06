@@ -36,7 +36,7 @@ public sealed class DockerJsonLinesTests
     public void Parse_MissingRequiredField_ThrowsJsonException()
     {
         const string output =
-            """{"Id":"aaa","Name":"/first","ImageId":"sha256:111","ConfiguredImage":"nginx:1"}""";
+            """{"Name":"/first","ImageId":"sha256:111","ConfiguredImage":"nginx:1"}""";
 
         Assert.ThrowsExactly<JsonException>(
             () => DockerJsonLines.Parse<DockerInspectRow>(output));
@@ -58,4 +58,24 @@ public sealed class DockerJsonLinesTests
         Assert.IsNull(images[0].Variant);
         Assert.IsNull(images[0].RepoDigests);
     }
+
+    [TestMethod]
+    public void Parse_AbsentOrNullImageMetadata_Succeeds()
+    {
+        var images = DockerJsonLines.Parse<DockerImageRow>("""
+            {"Id":"sha256:abc"}
+            {"Id":null,"Os":null,"Architecture":null,"RepoDigests":[null,""]}
+            """);
+        Assert.HasCount(2, images);
+        Assert.IsNull(images[0].Os);
+        Assert.IsNull(images[0].RepoDigests);
+        Assert.IsNull(images[1].Id);
+        var container = DockerJsonLines.Parse<DockerInspectRow>("""{"Id":"a","Name":"/app"}""").Single();
+        Assert.IsNull(container.ConfiguredImage);
+        Assert.IsNull(container.ImageId);
+    }
+
+    [TestMethod]
+    public void Parse_NullRecord_ThrowsJsonException() => Assert.ThrowsExactly<JsonException>(
+        () => DockerJsonLines.Parse<DockerImageRow>("null"));
 }

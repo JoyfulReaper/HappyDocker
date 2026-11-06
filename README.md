@@ -2,7 +2,7 @@
 
 **Read-only Docker image update and vulnerability monitoring.**
 
-HappyDocker is a planned .NET 10 tool for identifying out-of-date container images and actionable security findings across self-hosted Docker servers. It reports what needs attention; it **does not** automatically update or restart production containers.
+HappyDocker is a .NET 10 tool with a working read-only Docker inventory CLI. Image update checks and vulnerability monitoring are planned. It **does not** automatically update or restart production containers.
 
 ## Goals
 
@@ -15,14 +15,40 @@ HappyDocker is a planned .NET 10 tool for identifying out-of-date container imag
 
 ## Current status
 
-**Planning only. No application code or automated changes.**
+Implemented:
+
+- `scan` lists running containers, their original configured image references, immutable image IDs, platforms, and repository digests where available.
+- Image-reference parsing supports Docker Hub defaults (`ubuntu` → `docker.io/library/ubuntu:latest`), namespace-qualified names, GHCR, explicit registry hosts and ports (including localhost and bracketed IPv6), tags, and digest pins.
+- References retain the original configured text alongside normalized registry, repository, tag, and digest fields. A digest pin does not acquire an implicit `latest` tag; an explicitly configured tag alongside a digest is preserved.
+- Classification separates registry-backed references, ambiguous names, content IDs, invalid references, and missing references. Explicit registry names and named digest pins identify a registry target; matching repository-digest metadata can also identify an unqualified name. This does not verify remote existence or prove that an image was pulled.
+- Unqualified names normalize using Docker naming rules but remain ambiguous without matching metadata: a name such as `team/app:dev` could be a local tag. Missing repository digests alone do not prove a local build. Content IDs identify no configured registry repository; unrelated repository digests are never used to guess one.
+- Missing image metadata is reported as unknown. Conflicting duplicate image inspection records are rejected with a diagnostic. Partial image-inspection failures still produce an inventory from available metadata and retain Docker's nonzero exit code.
+- Unit tests cover parsing, normalization, classification, metadata handling, and scan commands/output using fixtures, without a Docker daemon.
+
+No registry network requests, update comparisons, vulnerability scanning, persistence, or notifications are implemented.
+
+### Run locally
+
+Install the .NET 10 SDK and Docker CLI, and ensure the local Docker daemon is accessible:
+
+```sh
+dotnet run --project src/HappyDocker -- scan
+```
+
+The scan invokes only `docker ps`, `docker inspect --type container`, and `docker image inspect`. The report keeps the configured reference and image ID columns, followed by repository digests, normalized reference, classification, and its reason. It never pulls images or changes Docker state.
+
+```sh
+dotnet test HappyDocker.slnx
+```
+
+Naming follows the [Docker distribution reference rules](https://github.com/distribution/reference). Digest validation currently supports lowercase hexadecimal SHA-256, SHA-384, and SHA-512 with their exact encoded lengths. Unsupported algorithms and malformed references are reported as invalid without interrupting the inventory.
 
 See [the project plan](docs/PLAN.md) for scope, milestones, design constraints, and open questions.
 
 ## Initial technology choices
 
 - **Runtime:** C# / .NET 10
-- **First interface:** Local read-only console report; JSON output later
+- **Interface:** Local read-only console report; JSON output planned
 - **State:** SQLite when change tracking is introduced
 - **Notifications:** ntfy
 - **Security scanning:** Existing scanner (Trivy or equivalent), with exact digest/version reported
@@ -42,4 +68,4 @@ WSIWOT **Work Item #28 — Docker Update Notification Bot** (existing tasks #274
 
 ## License
 
-To be decided before public release.
+[MIT](LICENSE), copyright (c) 2026 Kyle Givler.

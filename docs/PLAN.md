@@ -101,7 +101,7 @@ Interfaces should be testable independently. Early development uses mocked regis
 3. Should initial security findings require `fix available` before notifying, while still keeping unfixed findings in reports?
 4. Which Trivy invocation and image-access mode avoids unnecessarily elevating the scanning service?
 5. What minimum inventory information may safely be sent in ntfy messages from private hosts?
-6. Public or private repository, and which license? No license is chosen yet.
+6. Public or private repository? The project uses the MIT license; see [LICENSE](../LICENSE).
 
 ## WSIWOT alignment
 
@@ -117,4 +117,4 @@ Interfaces should be testable independently. Early development uses mocked regis
 
 ## Next session (smallest worthwhile coding slice)
 
-Implement the read-only Docker inventory CLI and show a table of Clanker's running container names, image references, and IDs. Stop there if energy is low.
+The read-only Docker inventory CLI and image-reference parsing are implemented; see [README](../README.md) for current behavior and test instructions. Validate the inventory against Clanker's running containers before beginning registry update checks.
