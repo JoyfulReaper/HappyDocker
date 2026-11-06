@@ -235,7 +235,7 @@ internal static class JsonValue
         catch { document.Dispose(); throw; }
     }
 
-    private static void Validate(JsonElement element)
+    internal static void Validate(JsonElement element)
     {
         if (element.ValueKind == JsonValueKind.Object)
         {

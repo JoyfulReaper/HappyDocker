@@ -20,7 +20,9 @@ HappyDocker should provide **actionable awareness, not unattended deployment**.
 
 ## Milestone 1 — inventory (WSIWOT #274)
 
-**Implemented:** local read-only `scan`, reference normalization/classification, graceful image metadata handling, and fixture-based tests. Validation against Clanker remains a manual follow-up; no SSH access is assumed.
+**Implemented:** local read-only `scan`, reference normalization/classification, graceful image metadata handling, and fixture-based tests. Clanker testing with `io.containerd.snapshotter.v1` exposed index IDs and synthetic build digests; those observations now inform the image-store compatibility and provenance regression fixtures. Validation of this revised implementation against Clanker remains a manual follow-up; no SSH access is assumed.
+
+Image inspection captures optional `Descriptor` and `Identity`, and container inspection captures optional `ImageManifestDescriptor`, using map access that tolerates absent properties. Pull/build origin is assessed independently from reference syntax and digest identity. Repository-digest names alone never establish a registry-backed image. Build-only images remain local; missing, contradictory, or mixed origin metadata is reported conservatively.
 
 - Choose a Docker API access pattern; start as a locally invoked CLI rather than a privileged always-on service.
 - List running containers and inspect their image metadata.
@@ -33,13 +35,15 @@ HappyDocker should provide **actionable awareness, not unattended deployment**.
 
 **First stage implemented:** `check` compares only each running container's configured mutable tag on Docker Hub or GHCR. Registry HTTP communication is separate from Docker inventory. Anonymous bearer authentication, bounded HTTPS redirects, request deadlines, response limits, and rate-limit cooldowns are implemented with `HttpClient` and mocked HTTP tests.
 
-The comparison resolves both the deployed repository digest and the current tag to an exact platform manifest, binds the deployed manifest's config digest to Docker's image ID, and validates changed image config/platform metadata. An index changing only for another architecture does not imply an update. Digest pins and ambiguous/local-only references are skipped. Missing or inconsistent identity/platform information produces `Unknown`.
+The comparison resolves deployed content and the current tag to exact platform manifests. Legacy images without descriptor/identity metadata retain configuration-digest verification against Docker's image ID, without inferring pull provenance. Containerd images require matching daemon pull records and a valid descriptor binding the image ID to an index, platform manifest, or configuration. Descriptor-backed deployed configs are also verified; image IDs are not blindly treated as configuration digests.
+
+Index IDs require the running container's platform manifest descriptor to avoid selecting the daemon's default platform accidentally. Supplied container platform metadata drives selection, and its digest/size/media type must agree with the manifest selected from the deployed index. Any candidate repository digest must resolve consistently with the descriptor. An index changing only for another architecture does not imply an update. Digest pins, build-only identities, and local-only references are skipped; mixed or contradictory provenance and insufficient platform/identity evidence produce `Unknown`. Digest, size, media-type, and configuration verification remain mandatory.
 
 Reports distinguish up to date, update available, unknown/insufficient metadata, unsupported registry, authentication required, registry unavailable, and skipped references. Only supported registry/auth endpoints and documented config CDN redirects are allowed; bearer tokens never cross hosts. Private registry credentials, persistent state, scheduling, and newer-version discovery remain out of scope for this stage. See [README](../README.md#comparison-rules-and-limits) for behavior and limitations.
 
 Remaining milestone work:
 
-- Validate the implemented Docker Hub/GHCR comparisons against real containers, including registry and platform failure cases.
+- Validate the revised Docker Hub/GHCR comparisons against legacy and containerd Docker stores, including Clanker's pulled NATS and locally built HappyQOTD, cross-platform containers, and registry/platform failures. The supplied NATS digest/identity excerpt is preserved in a metadata fixture; comparison fixtures use generated content with real computed digests rather than invented payloads for that digest.
 - Consider explicit credential support and additional documented CDN endpoints if needed for deployed workloads; preserve the supported-host boundary.
 - **Newer-version suggestion:** where safe to infer from a recognized tag family (e.g. `2.14.3-alpine` -> `2.14.8-alpine`), suggest a candidate but never assume semantic version tags exist or that a higher version is compatible.
 - Keep any future version suggestions conservative with `latest`, `dev`, moving major tags, prereleases, and variant suffixes.

@@ -138,22 +138,22 @@ public sealed class ImageReferenceTests
     {
         foreach (string id in new[] { Digest, new string('a', 64) })
         {
-            ImageReference parsed = ImageReference.Parse(id).WithMetadata(["ubuntu@" + Digest]);
+            ImageReference parsed = ImageReference.Parse(id).WithMetadata(new(RepoDigests: ["ubuntu@" + Digest]));
             Assert.AreEqual(ImageReferenceKind.LocalImageId, parsed.Kind);
             Assert.IsNull(parsed.Normalized);
             Assert.AreEqual(id, parsed.Original);
         }
         Assert.AreEqual(ImageReferenceKind.Ambiguous,
-            ImageReference.Parse("abc123").WithMetadata(["ubuntu@" + Digest]).Kind);
+            ImageReference.Parse("abc123").WithMetadata(new(RepoDigests: ["ubuntu@" + Digest])).Kind);
         Assert.AreEqual(ImageReferenceKind.Ambiguous, ImageReference.Parse("abcdef123456").Kind);
     }
 
     [TestMethod]
-    public void WithMetadata_MatchingRepositoryDigest_ConfirmsHubReference()
+    public void WithMetadata_MatchingRepositoryDigestAlone_DoesNotProveOrigin()
     {
         ImageReference parsed = ImageReference.Parse("ubuntu:24.04")
-            .WithMetadata([null, "invalid@digest", "index.docker.io/library/ubuntu@" + OtherDigest]);
-        Assert.AreEqual(ImageReferenceKind.RegistryBacked, parsed.Kind);
+            .WithMetadata(new(RepoDigests: [null, "invalid@digest", "index.docker.io/library/ubuntu@" + OtherDigest]));
+        Assert.AreEqual(ImageReferenceKind.Ambiguous, parsed.Kind);
         Assert.AreEqual("ubuntu:24.04", parsed.Original);
         Assert.AreEqual("24.04", parsed.Tag);
         Assert.IsNull(parsed.Digest); // An image's repo digest does not change its configured pin.
@@ -168,16 +168,19 @@ public sealed class ImageReferenceTests
             ["ghcr.io/library/ubuntu@" + Digest], ["docker.io/team/ubuntu@" + Digest] })
         {
             Assert.AreEqual(ImageReferenceKind.Ambiguous,
-                ImageReference.Parse("ubuntu").WithMetadata(metadata).Kind);
+                ImageReference.Parse("ubuntu").WithMetadata(new(RepoDigests: metadata)).Kind);
         }
     }
 
     [TestMethod]
-    public void WithMetadata_PinnedDigest_RequiresSameDigestForConfirmation()
+    public void WithMetadata_PinnedDigest_StaysPinnedWithoutInferringProvenance()
     {
         ImageReference parsed = ImageReference.Parse("ubuntu@" + Digest);
-        Assert.AreEqual(parsed, parsed.WithMetadata(["ubuntu@" + OtherDigest]));
-        Assert.Contains("Matching repository digest", parsed.WithMetadata(["ubuntu@" + Digest]).Reason);
+        ImageReference assessed = parsed.WithMetadata(new(RepoDigests: ["ubuntu@" + Digest]));
+        Assert.AreEqual(ImageReferenceKind.Ambiguous, assessed.Kind);
+        Assert.IsTrue(assessed.IsDigestPinned);
+        Assert.AreEqual(parsed.Normalized, assessed.Normalized);
+        Assert.AreEqual(parsed.Original, assessed.Original);
         Assert.AreEqual(Digest, parsed.Digest); // Image config IDs and registry manifest digests are different concepts.
     }
 }

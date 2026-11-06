@@ -45,6 +45,7 @@ internal sealed class RegistryFixture : IDisposable
         Image = new(Digest(OldConfig), "linux", "amd64", null, [$"{registry}/{repository}@{Digest(OldManifest)}"]);
         AddManifest(OldManifest);
         AddManifest(NewManifest);
+        AddConfig(OldConfig);
         AddConfig(NewConfig);
         SetTag(OldManifest);
         Client = new RegistryClient(new FakeRegistryHandler((request, _) =>
@@ -67,6 +68,22 @@ internal sealed class RegistryFixture : IDisposable
     }
     internal void AddConfig(byte[] bytes) => routes[$"/v2/{Repository}/blobs/{Digest(bytes)}"] = bytes;
     internal void SetDeployed(byte[] bytes) => Image = Image with { RepoDigests = [$"{Registry}/{Repository}@{AddManifest(bytes)}"] };
+    internal void UseContainerd(bool index)
+    {
+        byte[] target = index ? Index(Descriptor(OldManifest)) : OldManifest;
+        SetDeployed(target);
+        Image = Image with
+        {
+            Id = Digest(target),
+            Descriptor = JsonSerializer.SerializeToElement(new
+            {
+                mediaType = index ? OciIndex : OciManifest, digest = Digest(target), size = target.Length
+            }),
+            Identity = JsonSerializer.SerializeToElement(new { Pull = new[] { new { Repository = $"{Registry}/{Repository}" } } })
+        };
+        Container = Container with { ImageId = Image.Id, ImageManifestDescriptor = JsonSerializer.SerializeToElement(Descriptor(OldManifest)) };
+        SetTag(target);
+    }
     internal HttpResponseMessage Respond(HttpRequestMessage request)
     {
         Assert.AreEqual(Host, request.RequestUri!.Host, "Unexpected registry host");

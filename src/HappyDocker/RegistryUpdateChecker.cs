@@ -10,56 +10,126 @@ public sealed class RegistryUpdateChecker(RegistryClient registry)
     public async Task<UpdateResult> CheckAsync(DockerInspectRow container, DockerImageRow? image,
         CancellationToken cancellationToken = default)
     {
-        ImageReference reference = ImageReference.Parse(container.ConfiguredImage).WithMetadata(image?.RepoDigests);
+        ImageReference reference = ImageReference.Parse(container.ConfiguredImage);
         if (reference.IsDigestPinned)
             return new(UpdateStatus.Skipped, "Configured image is digest-pinned.");
-        if (reference.Kind is ImageReferenceKind.Ambiguous or ImageReferenceKind.LocalImageId)
+        if (reference.Kind == ImageReferenceKind.LocalImageId)
             return new(UpdateStatus.Skipped, "Ambiguous or local-only reference; no registry comparison attempted.");
         if (reference.Repository is null || reference.Tag is null)
             return new(UpdateStatus.Unknown, reference.Reason);
+        ImageProvenance provenance = DockerImageIdentity.Provenance(reference, image);
+        if (provenance.Kind == ImageProvenanceKind.BuildOnly)
+            return new(UpdateStatus.Skipped, provenance.Reason);
         if (!RegistryClient.Supports(reference.Registry))
             return new(UpdateStatus.UnsupportedRegistry, "Only Docker Hub and GHCR are supported.");
+        if (provenance.Kind is ImageProvenanceKind.Unknown or ImageProvenanceKind.Mixed)
+            return new(UpdateStatus.Unknown, provenance.Reason);
+        bool hasDescriptor = DockerImageIdentity.Present(image?.Descriptor);
+        if (hasDescriptor && provenance.Kind != ImageProvenanceKind.Pulled)
+            return new(UpdateStatus.Unknown, "Image descriptor is present but matching pull provenance is unavailable.");
+        if (provenance.Kind == ImageProvenanceKind.Missing && !hasDescriptor && !reference.HasExplicitRegistry
+            && !(image?.RepoDigests ?? []).Select(ImageReference.Parse).Any(r => r.IsDigestPinned
+                && r.Registry == reference.Registry && r.Repository == reference.Repository))
+            return new(UpdateStatus.Skipped, "Ambiguous reference without pull identity or a candidate deployed repository digest.");
         if (image is null || image.Id != container.ImageId || !ImageReference.IsSupportedDigest(image.Id ?? "")
-            || string.IsNullOrWhiteSpace(image.Os) || string.IsNullOrWhiteSpace(image.Architecture)
-            || (!string.IsNullOrWhiteSpace(container.Platform) && container.Platform != image.Os))
+            || string.IsNullOrWhiteSpace(image.Os) || string.IsNullOrWhiteSpace(image.Architecture))
             return new(UpdateStatus.Unknown, "Missing or inconsistent deployed image identity or platform metadata.");
+
+        ImageDescriptor? descriptor = DockerImageIdentity.ReadDescriptor(image.Descriptor);
+        if (hasDescriptor && (descriptor is null || descriptor.Digest != image.Id))
+            return new(UpdateStatus.Unknown, "Image ID and image descriptor are invalid or inconsistent.");
+        ImageDigestKind identityKind = descriptor?.Kind ?? ImageDigestKind.Configuration;
+        ImageDescriptor? containerDescriptor = DockerImageIdentity.ReadDescriptor(container.ImageManifestDescriptor);
+        if (DockerImageIdentity.Present(container.ImageManifestDescriptor)
+            && containerDescriptor?.Kind != ImageDigestKind.PlatformManifest)
+            return new(UpdateStatus.Unknown, "Container platform manifest descriptor is invalid or unsupported.");
+        if (identityKind == ImageDigestKind.ImageIndex && containerDescriptor is null)
+            return new(UpdateStatus.Unknown, "Index image ID needs the container's platform manifest descriptor to identify the deployed platform.");
+        if (DockerImageIdentity.Present(containerDescriptor?.Platform))
+        {
+            JsonElement platform = containerDescriptor!.Platform!.Value;
+            var deployedPlatform = image with
+            {
+                Os = JsonValue.String(platform, "os"), Architecture = JsonValue.String(platform, "architecture"),
+                Variant = JsonValue.String(platform, "variant")
+            };
+            if (string.IsNullOrWhiteSpace(deployedPlatform.Os) || string.IsNullOrWhiteSpace(deployedPlatform.Architecture)
+                || !MatchesPlatform(platform, deployedPlatform, false)
+                || (identityKind != ImageDigestKind.ImageIndex && !MatchesPlatform(platform, image, false)))
+                return new(UpdateStatus.Unknown, "Container and image platform metadata are inconsistent or incomplete.");
+            // An index's image inspection can describe the daemon's default platform, not this container.
+            image = deployedPlatform;
+        }
+        if ((!string.IsNullOrWhiteSpace(container.Platform) && container.Platform != image.Os)
+            || (DockerImageIdentity.Present(descriptor?.Platform) && !MatchesPlatform(descriptor!.Platform!.Value, image, false)))
+            return new(UpdateStatus.Unknown, "Container and image descriptor platforms disagree.");
 
         string[] deployedDigests = (image.RepoDigests ?? []).Select(ImageReference.Parse)
             .Where(r => r.IsDigestPinned && r.Registry == reference.Registry && r.Repository == reference.Repository)
             .Select(r => r.Digest!).Distinct(StringComparer.Ordinal).ToArray();
-        if (deployedDigests.Length != 1)
+        if (deployedDigests.Length > 1 || (deployedDigests.Length == 0 && identityKind == ImageDigestKind.Configuration))
             return new(UpdateStatus.Unknown, "Need one unambiguous deployed repository digest for the configured repository.");
 
         try
         {
             // Resolve the immutable deployed reference first. It can be either an index or a manifest.
             var cache = new Dictionary<string, RegistryDocument>(StringComparer.Ordinal);
-            PlatformManifest deployed = await ResolveAsync(reference, deployedDigests[0], image, cache, 0, false, cancellationToken);
-            if (deployed.ConfigDigest != image.Id)
+            PlatformManifest deployed = descriptor is { Kind: ImageDigestKind.ImageIndex or ImageDigestKind.PlatformManifest }
+                ? await ResolveAsync(reference, descriptor.Digest, image, cache, 0, DockerImageIdentity.Present(descriptor.Platform),
+                    cancellationToken, descriptor.MediaType, descriptor.Size)
+                : await ResolveAsync(reference, deployedDigests[0], image, cache, 0, false, cancellationToken);
+            if (identityKind == ImageDigestKind.Configuration && deployed.ConfigDigest != image.Id)
                 return new(UpdateStatus.Unknown, "Deployed repository manifest is not tied to the local image configuration.");
+            if (descriptor is not null && identityKind != ImageDigestKind.Configuration && deployedDigests.Length == 1
+                && deployedDigests[0] != descriptor.Digest)
+            {
+                PlatformManifest repositoryManifest = await ResolveAsync(reference, deployedDigests[0], image, cache, 0, false, cancellationToken);
+                if (repositoryManifest.Digest != deployed.Digest)
+                    return new(UpdateStatus.Unknown, "Repository digest conflicts with the deployed image descriptor.");
+            }
+            if (containerDescriptor is not null)
+            {
+                PlatformManifest containerManifest = await ResolveAsync(reference, containerDescriptor.Digest, image, cache, 0,
+                    DockerImageIdentity.Present(containerDescriptor.Platform), cancellationToken, containerDescriptor.MediaType, containerDescriptor.Size);
+                if (containerManifest.Digest != deployed.Digest)
+                    return new(UpdateStatus.Unknown, "Container platform manifest is not the manifest resolved from the deployed image.");
+            }
+            if (descriptor is not null)
+            {
+                await VerifyConfigAsync(reference, deployed, image, cancellationToken);
+                if (identityKind == ImageDigestKind.Configuration && descriptor.Size != deployed.ConfigSize)
+                    return new(UpdateStatus.Unknown, "Configuration descriptor size disagrees with the deployed manifest.");
+            }
+            string provenanceNote = provenance.Kind == ImageProvenanceKind.Missing
+                ? " Legacy configuration identity verified; pull provenance remains unavailable." : "";
             PlatformManifest current = await ResolveAsync(reference, reference.Tag, image, cache, 0, false, cancellationToken);
             if (deployed.Digest == current.Digest)
-                return new(UpdateStatus.UpToDate, "Configured tag still resolves to the deployed platform manifest.", deployed.Digest, current.Digest);
+                return new(UpdateStatus.UpToDate, "Configured tag still resolves to the deployed platform manifest." + provenanceNote, deployed.Digest, current.Digest);
             if (deployed.ConfigDigest == current.ConfigDigest)
                 return new(UpdateStatus.Unknown, "Manifest changed but image configuration did not; no reliable image update inferred.", deployed.Digest, current.Digest);
 
-            // A single manifest has no platform field. Verify its config metadata, never download layers.
-            RegistryDocument config = await registry.GetAsync(reference.Registry!, reference.Repository!, current.ConfigDigest, true, cancellationToken);
-            if (config.Bytes.LongLength != current.ConfigSize)
-                return new(UpdateStatus.Unknown, "Image configuration size disagrees with its manifest descriptor.");
-            using JsonDocument document = JsonValue.Parse(config.Bytes);
-            JsonElement root = document.RootElement;
-            if (!MatchesPlatform(root, image, allowMissingVariant: current.HasPlatformDescriptor))
-                return new(UpdateStatus.Unknown, "Current image platform cannot be matched reliably to the deployed platform.");
-            if (!root.TryGetProperty("rootfs", out var rootfs) || JsonValue.String(rootfs, "type") != "layers"
-                || !rootfs.TryGetProperty("diff_ids", out var diffIds) || diffIds.ValueKind != JsonValueKind.Array
-                || diffIds.GetArrayLength() != current.LayerCount
-                || diffIds.EnumerateArray().Any(d => d.ValueKind != JsonValueKind.String || !ImageReference.IsSupportedDigest(d.GetString()!)))
-                return new(UpdateStatus.Unknown, "Current image configuration has inconsistent filesystem metadata.");
-            return new(UpdateStatus.UpdateAvailable, "Configured tag resolves to a different image for the deployed platform.", deployed.Digest, current.Digest);
+            await VerifyConfigAsync(reference, current, image, cancellationToken);
+            return new(UpdateStatus.UpdateAvailable, "Configured tag resolves to a different image for the deployed platform." + provenanceNote, deployed.Digest, current.Digest);
         }
         catch (RegistryException exception) { return exception.Result; }
         catch (JsonException) { return new(UpdateStatus.Unknown, "Registry returned malformed image metadata."); }
+    }
+
+    private async Task VerifyConfigAsync(ImageReference reference, PlatformManifest manifest, DockerImageRow image,
+        CancellationToken cancellationToken)
+    {
+        RegistryDocument config = await registry.GetAsync(reference.Registry!, reference.Repository!, manifest.ConfigDigest, true, cancellationToken);
+        if (config.Bytes.LongLength != manifest.ConfigSize)
+            throw Unknown("Image configuration size disagrees with its manifest descriptor.");
+        using JsonDocument document = JsonValue.Parse(config.Bytes);
+        JsonElement root = document.RootElement;
+        if (!MatchesPlatform(root, image, allowMissingVariant: manifest.HasPlatformDescriptor))
+            throw Unknown("Image configuration platform cannot be matched reliably to the deployed platform.");
+        if (!root.TryGetProperty("rootfs", out var rootfs) || JsonValue.String(rootfs, "type") != "layers"
+            || !rootfs.TryGetProperty("diff_ids", out var diffIds) || diffIds.ValueKind != JsonValueKind.Array
+            || diffIds.GetArrayLength() != manifest.LayerCount
+            || diffIds.EnumerateArray().Any(d => d.ValueKind != JsonValueKind.String || !ImageReference.IsSupportedDigest(d.GetString()!)))
+            throw Unknown("Image configuration has inconsistent filesystem metadata.");
     }
 
     private async Task<PlatformManifest> ResolveAsync(ImageReference reference, string selector, DockerImageRow image,

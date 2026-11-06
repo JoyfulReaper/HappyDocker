@@ -25,14 +25,14 @@ public static class DockerScan
         if (containers.Count == 0) return new(0, [], []);
 
         const string inspectFormat =
-            """{"Id":{{json .Id}},"Name":{{json .Name}},"ImageId":{{json .Image}},"ConfiguredImage":{{json .Config.Image}},"Platform":{{json .Platform}}}""";
+            """{"Id":{{json .Id}},"Name":{{json .Name}},"ImageId":{{json .Image}},"ConfiguredImage":{{json .Config.Image}},"Platform":{{json .Platform}},"ImageManifestDescriptor":{{json (index . "ImageManifestDescriptor")}}}""";
         DockerCommandResult inspect = await runDocker(["inspect", "--type", "container", "--format", inspectFormat,
             .. containers.Select(c => c.ID)]);
         if (inspect.ExitCode != 0) { error.WriteLine(inspect.Stderr); return new(inspect.ExitCode, [], []); }
         var inspected = DockerJsonLines.Parse<DockerInspectRow>(inspect.Stdout);
 
         const string imageFormat =
-            """{"Id":{{json .Id}},"Os":{{json .Os}},"Architecture":{{json .Architecture}},"Variant":{{json (index . "Variant")}},"RepoDigests":{{json (index . "RepoDigests")}}}""";
+            """{"Id":{{json .Id}},"Os":{{json .Os}},"Architecture":{{json .Architecture}},"Variant":{{json (index . "Variant")}},"RepoDigests":{{json (index . "RepoDigests")}},"Descriptor":{{json (index . "Descriptor")}},"Identity":{{json (index . "Identity")}}}""";
         string[] imageIds = inspected.Select(c => c.ImageId).Where(id => !string.IsNullOrWhiteSpace(id))
             .Select(id => id!).Distinct(StringComparer.Ordinal).ToArray();
         DockerCommandResult images = imageIds.Length == 0 ? new(0, "", "")
@@ -56,8 +56,14 @@ public static class DockerScan
             output.WriteLine($"{container.Name.TrimStart('/'),-24} {platform,-18} {Known(container.ConfiguredImage),-58} {Known(container.ImageId)}");
             string[] digests = image is null ? [] : DigestSet(image).ToArray();
             output.WriteLine($"  Repository digests: {(image is null ? "<unknown>" : digests.Length == 0 ? "<none>" : string.Join(", ", digests))}");
+            if (DockerImageIdentity.Present(image?.Descriptor))
+            {
+                ImageDescriptor? descriptor = DockerImageIdentity.ReadDescriptor(image!.Descriptor);
+                ImageDigestKind kind = descriptor is not null && descriptor.Digest == image.Id ? descriptor.Kind : ImageDigestKind.Unknown;
+                output.WriteLine($"  Image ID descriptor: {kind}");
+            }
 
-            ImageReference reference = ImageReference.Parse(container.ConfiguredImage).WithMetadata(digests);
+            ImageReference reference = ImageReference.Parse(container.ConfiguredImage).WithMetadata(image);
             output.WriteLine($"  Reference: {reference.Kind}{(reference.IsDigestPinned ? " (digest-pinned)" : "")}; {reference.Normalized ?? "<none>"}");
             output.WriteLine($"  {reference.Reason}");
         }
@@ -70,7 +76,9 @@ public static class DockerScan
         {
             DockerImageRow first = group.First();
             if (group.Any(i => i.Os != first.Os || i.Architecture != first.Architecture || i.Variant != first.Variant
-                || !DigestSet(i).SequenceEqual(DigestSet(first))))
+                || !DigestSet(i).SequenceEqual(DigestSet(first))
+                || !DockerImageIdentity.Equivalent(i.Descriptor, first.Descriptor)
+                || !DockerImageIdentity.Equivalent(i.Identity, first.Identity)))
             {
                 error.WriteLine($"Conflicting image metadata for {group.Key}; reporting metadata as unknown.");
                 continue;
@@ -95,4 +103,5 @@ public sealed record DockerInspectRow(
     string Name,
     string? ImageId = null,
     string? ConfiguredImage = null,
-    string? Platform = null);
+    string? Platform = null,
+    System.Text.Json.JsonElement? ImageManifestDescriptor = null);

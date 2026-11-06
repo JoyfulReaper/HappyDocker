@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 
 namespace HappyDocker;
 
-public enum ImageReferenceKind { Missing, Invalid, LocalImageId, Ambiguous, RegistryBacked }
+public enum ImageReferenceKind { Missing, Invalid, LocalImageId, Ambiguous, RegistryBacked, LocallyBuilt }
 
 /// <summary>A parsed configured reference. Normalization describes Docker naming rules, not provenance.</summary>
 public sealed record ImageReference(
@@ -89,20 +89,21 @@ public sealed record ImageReference(
                 : "Docker Hub naming default; could also be a local tag.");
     }
 
-    /// <summary>Only metadata for the same repository (and pinned digest, if any) is evidence.</summary>
-    public ImageReference WithMetadata(IEnumerable<string?>? repoDigests)
+    /// <summary>Provenance requires daemon pull/build evidence, not synthetic repository digest names.</summary>
+    public ImageReference WithMetadata(DockerImageRow? image)
     {
-        if (Repository is null || repoDigests is null) return this;
-        foreach (string? value in repoDigests)
+        if (Repository is null) return this;
+        ImageProvenance provenance = DockerImageIdentity.Provenance(this, image);
+        return this with
         {
-            ImageReference candidate = Parse(value);
-            if (candidate.IsDigestPinned && string.Equals(candidate.Registry, Registry, StringComparison.OrdinalIgnoreCase)
-                && candidate.Repository == Repository
-                && (Digest is null || candidate.Digest == Digest))
-                return this with { Kind = ImageReferenceKind.RegistryBacked,
-                    Reason = "Matching repository digest exists in the inspected image metadata." };
-        }
-        return this;
+            Kind = provenance.Kind switch
+            {
+                ImageProvenanceKind.Pulled => ImageReferenceKind.RegistryBacked,
+                ImageProvenanceKind.BuildOnly => ImageReferenceKind.LocallyBuilt,
+                _ => ImageReferenceKind.Ambiguous
+            },
+            Reason = provenance.Reason
+        };
     }
 
     internal static bool IsSupportedDigest(string value)

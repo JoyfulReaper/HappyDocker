@@ -16,7 +16,7 @@ public sealed class DockerScanTests
                 {"Id":"c1","Name":"/app","ImageId":"sha256:123","ConfiguredImage":"ubuntu:24.04","Platform":"linux"}
                 {"Id":"c2","Name":"/other","ImageId":"sha256:123","ConfiguredImage":"ghcr.io/org/app:RC1","Platform":"linux"}
                 """, ""),
-            new(0, $$"""{"Id":"sha256:123","Os":"linux","Architecture":"arm64","Variant":"v8","RepoDigests":["ubuntu@{{Digest}}"]}""", "")
+            new(0, $$$"""{"Id":"sha256:123","Os":"linux","Architecture":"arm64","Variant":"v8","RepoDigests":["ubuntu@{{{Digest}}}"],"Identity":{"Pull":[{"Repository":"docker.io/library/ubuntu"}]}}""", "")
         ]);
         using var output = new StringWriter();
         using var error = new StringWriter();
@@ -28,8 +28,11 @@ public sealed class DockerScanTests
         CollectionAssert.AreEqual(new[] { "ps", "--format", "{{json .}}" }, commands[0]);
         CollectionAssert.AreEqual(new[] { "inspect", "--type", "container", "--format" }, commands[1][..4]);
         CollectionAssert.AreEqual(new[] { "c1", "c2" }, commands[1][5..]);
+        Assert.Contains("(index . \"ImageManifestDescriptor\")", commands[1][4]);
         CollectionAssert.AreEqual(new[] { "image", "inspect", "--format" }, commands[2][..3]);
         CollectionAssert.AreEqual(new[] { "sha256:123" }, commands[2][4..]);
+        Assert.Contains("(index . \"Descriptor\")", commands[2][3]);
+        Assert.Contains("(index . \"Identity\")", commands[2][3]);
         string report = output.ToString();
         foreach (string expected in new[] { "CONTAINER", "PLATFORM", "IMAGE ID", "app", "other", "linux/arm64/v8",
             "ubuntu:24.04", "ghcr.io/org/app:RC1", "sha256:123", "Repository digests: ubuntu@" + Digest,
@@ -105,7 +108,8 @@ public sealed class DockerScanTests
     public void WriteReport_DuplicateMetadata_UsesEquivalentRowsButRejectsConflicts()
     {
         var containers = new[] { new DockerInspectRow("a", "/app", "id", "ubuntu") };
-        var first = new DockerImageRow("id", "linux", "amd64", null, ["ubuntu@" + Digest, null]);
+        var first = new DockerImageRow("id", "linux", "amd64", null, ["ubuntu@" + Digest, null],
+            Identity: System.Text.Json.JsonSerializer.SerializeToElement(new { Pull = new[] { new { Repository = "docker.io/library/ubuntu" } } }));
         using var output = new StringWriter();
         using var error = new StringWriter();
         DockerScan.WriteReport(containers, [new(), first, first with { RepoDigests = ["ubuntu@" + Digest] }], output, error);
@@ -140,6 +144,6 @@ public sealed class DockerScanTests
             [new("sha256:local", "linux", "amd64")], output, TextWriter.Null);
         Assert.Contains(configured, output.ToString());
         Assert.Contains("sha256:local", output.ToString());
-        Assert.Contains("Reference: RegistryBacked (digest-pinned)", output.ToString());
+        Assert.Contains("Reference: Ambiguous (digest-pinned)", output.ToString());
     }
 }
