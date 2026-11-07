@@ -22,20 +22,22 @@ internal sealed class RegistryException(UpdateStatus status, string message, Dat
 
 internal sealed record RegistryDocument(byte[] Bytes, string Digest, string? MediaType);
 
-/// <summary>Anonymous, bounded GETs to supported registries. Owns its HttpClient for the command lifetime.</summary>
+/// <summary>Bounded GETs to supported registries. Owns its HttpClient for the command lifetime.</summary>
 public sealed class RegistryClient : IDisposable
 {
     private readonly HttpClient http;
     private readonly TimeSpan timeout;
+    private readonly GhcrCredentials? ghcrCredentials;
     private readonly Dictionary<string, string> tokens = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> rateLimits = new(StringComparer.Ordinal);
     internal const string OciManifest = "application/vnd.oci.image.manifest.v1+json";
     internal const string DockerManifest = "application/vnd.docker.distribution.manifest.v2+json";
     internal const string OciIndex = "application/vnd.oci.image.index.v1+json";
     internal const string DockerIndex = "application/vnd.docker.distribution.manifest.list.v2+json";
+    private const string GhcrTokenEndpoint = "https://ghcr.io/token";
 
     // Inject a non-redirecting handler for tests. The production handler never follows redirects itself.
-    public RegistryClient(HttpMessageHandler? handler = null, TimeSpan? requestTimeout = null)
+    public RegistryClient(HttpMessageHandler? handler = null, TimeSpan? requestTimeout = null, GhcrCredentials? ghcrCredentials = null)
     {
         http = new HttpClient(handler ?? new SocketsHttpHandler
         {
@@ -44,6 +46,7 @@ public sealed class RegistryClient : IDisposable
             ConnectTimeout = TimeSpan.FromSeconds(10)
         }) { Timeout = Timeout.InfiniteTimeSpan };
         timeout = requestTimeout ?? TimeSpan.FromSeconds(15);
+        this.ghcrCredentials = ghcrCredentials;
     }
 
     public static bool Supports(string? registry) => registry is "docker.io" or "ghcr.io";
@@ -98,15 +101,19 @@ public sealed class RegistryClient : IDisposable
         string? cdnHost = !config ? null : registry == "docker.io"
             ? "production.cloudfront.docker.com" : "pkg-containers.githubusercontent.com";
         HttpResponseMessage response = await SendAsync(uri, token, cancellationToken, cdnHost);
-        if (response.StatusCode != HttpStatusCode.Unauthorized) return response;
+        if (response.StatusCode != HttpStatusCode.Unauthorized)
+        {
+            if (response.StatusCode == HttpStatusCode.Forbidden) tokens.Remove(key);
+            return response;
+        }
+        tokens.Remove(key);
         try
         {
-            AuthenticationHeaderValue[] challenges = response.Headers.WwwAuthenticate
-                .Where(h => h.Scheme.Equals("Bearer", StringComparison.OrdinalIgnoreCase)).ToArray();
-            if (challenges.Length != 1)
-                throw new RegistryException(UpdateStatus.AuthenticationRequired, "Registry requires authentication; anonymous bearer access is unavailable.");
+            AuthenticationHeaderValue[] challenges = response.Headers.WwwAuthenticate.ToArray();
+            if (challenges.Length != 1 || !challenges[0].Scheme.Equals("Bearer", StringComparison.OrdinalIgnoreCase))
+                throw new RegistryException(UpdateStatus.AuthenticationRequired, "Registry did not provide a single supported bearer challenge.");
             Uri tokenUri = TokenUri(challenges[0].Parameter, registry, repository);
-            using HttpResponseMessage tokenResponse = await SendAsync(tokenUri, null, cancellationToken);
+            using HttpResponseMessage tokenResponse = await RequestTokenAsync(tokenUri, registry, cancellationToken);
             CheckStatus(tokenResponse, registry);
             byte[] bytes = await ReadBoundedAsync(tokenResponse, 64 * 1024, cancellationToken);
             using JsonDocument document = JsonValue.Parse(bytes);
@@ -114,15 +121,36 @@ public sealed class RegistryClient : IDisposable
                 ?? JsonValue.String(document.RootElement, "access_token");
             if (string.IsNullOrEmpty(newToken) || newToken.Length > 16000
                 || newToken.Any(c => !char.IsAsciiLetterOrDigit(c) && !"-._~+/=".Contains(c)))
-                throw new RegistryException(UpdateStatus.AuthenticationRequired, "Anonymous token response was invalid.");
-            tokens[key] = newToken;
-            return await SendAsync(uri, newToken, cancellationToken, cdnHost);
+                throw new RegistryException(UpdateStatus.AuthenticationRequired, "Registry bearer token response was invalid.");
+            HttpResponseMessage retry = await SendAsync(uri, newToken, cancellationToken, cdnHost);
+            if (retry.IsSuccessStatusCode) tokens[key] = newToken;
+            return retry;
         }
         catch (JsonException)
         {
-            throw new RegistryException(UpdateStatus.AuthenticationRequired, "Anonymous token response was invalid.");
+            throw new RegistryException(UpdateStatus.AuthenticationRequired, "Registry bearer token response was invalid.");
         }
         finally { response.Dispose(); }
+    }
+
+    private async Task<HttpResponseMessage> RequestTokenAsync(Uri tokenUri, string registry, CancellationToken cancellationToken)
+    {
+        if (registry != "ghcr.io" || ghcrCredentials is null)
+            return await SendAsync(tokenUri, null, cancellationToken);
+
+        // TokenUri constructs the destination from fixed endpoints and an exact pull scope.
+        if (tokenUri.GetLeftPart(UriPartial.Path) != GhcrTokenEndpoint)
+            throw new RegistryException(UpdateStatus.AuthenticationRequired, "GHCR credential exchange destination was unsafe.");
+
+        // Use a single request with the non-redirecting handler. Basic never enters the redirect loop.
+        using var request = new HttpRequestMessage(HttpMethod.Get, tokenUri);
+        request.Headers.Accept.Add(new("application/json"));
+        request.Headers.Authorization = ghcrCredentials.Authorization;
+        HttpResponseMessage response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if ((int)response.StatusCode is < 300 or >= 400) return response;
+
+        response.Dispose();
+        throw new RegistryException(UpdateStatus.AuthenticationRequired, "GHCR credential exchange returned a redirect, which was blocked.");
     }
 
     private static Uri TokenUri(string? challenge, string registry, string repository)
@@ -136,7 +164,7 @@ public sealed class RegistryClient : IDisposable
             if (!parameters.TryAdd(match.Groups["key"].Value, match.Groups["value"].Value))
                 throw new RegistryException(UpdateStatus.AuthenticationRequired, "Registry bearer challenge is ambiguous.");
         }
-        string realm = registry == "docker.io" ? "https://auth.docker.io/token" : "https://ghcr.io/token";
+        string realm = registry == "docker.io" ? "https://auth.docker.io/token" : GhcrTokenEndpoint;
         string service = registry == "docker.io" ? "registry.docker.io" : "ghcr.io";
         string scope = $"repository:{repository}:pull";
         if (consumed == 0 || consumed != challenge?.Length
@@ -158,6 +186,11 @@ public sealed class RegistryClient : IDisposable
             request.Headers.Accept.ParseAdd($"{OciIndex}, {DockerIndex}, {OciManifest}, {DockerManifest}, application/json");
             if (token is not null) request.Headers.Authorization = new("Bearer", token);
             HttpResponseMessage response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (uri.Host != originalHost && response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            {
+                response.Dispose();
+                throw new RegistryException(UpdateStatus.AuthenticationRequired, "Registry CDN denied the configuration request.");
+            }
             if ((int)response.StatusCode is not (301 or 302 or 303 or 307 or 308)) return response;
             Uri? location = response.Headers.Location;
             response.Dispose();
@@ -176,7 +209,12 @@ public sealed class RegistryClient : IDisposable
     {
         if (response.IsSuccessStatusCode) return;
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-            throw new RegistryException(UpdateStatus.AuthenticationRequired, "Registry requires credentials; only anonymous access is supported.");
+        {
+            string reason = registry != "ghcr.io" ? "Docker Hub denied anonymous registry access."
+                : ghcrCredentials is null ? $"GHCR denied anonymous access. Configure {GhcrCredentials.UsernameVariable} and {GhcrCredentials.TokenFileVariable} for private packages."
+                : "GHCR denied access with the configured credentials. Check PAT expiry, read:packages scope, and package access.";
+            throw new RegistryException(UpdateStatus.AuthenticationRequired, reason);
+        }
         if (response.StatusCode == HttpStatusCode.TooManyRequests)
         {
             DateTimeOffset now = DateTimeOffset.UtcNow;

@@ -24,7 +24,7 @@ Implemented:
 - Unqualified names normalize using Docker naming rules: a name such as `team/app:dev` could be a local tag. Repository digests alone never promote a name to registry-backed; containerd can synthesize them for local builds. Missing digests do not prove a build, and missing, malformed, nonmatching, or mixed pull/build identity records do not prove a pull. Content IDs identify no configured registry repository.
 - Missing image metadata is reported as unknown. Conflicting duplicate image inspection records are rejected with a diagnostic. Partial image-inspection failures still produce an inventory from available metadata and retain Docker's nonzero exit code.
 - Unit tests cover parsing, normalization, classification, metadata handling, and scan commands/output using fixtures, without a Docker daemon.
-- `check` determines whether the configured tag resolves to a different image for the deployed platform, using anonymous Docker Registry HTTP API access to Docker Hub and GHCR.
+- `check` determines whether the configured tag resolves to a different image for the deployed platform. Docker Hub and GHCR use anonymous access by default. Private GHCR packages can use explicitly configured credentials.
 - Registry tests use mocked HTTP responses, including authentication, redirects, rate limits, timeouts, multi-architecture indexes, unchanged NATS version tags, both Docker image stores, synthetic local repository digests, and incomplete or inconsistent metadata. Clanker's pulled NATS and build-only HappyQOTD identity examples are regression fixtures.
 
 Newer-version discovery, vulnerability scanning, persistence, scheduling, notifications, and automatic updates are not implemented.
@@ -61,6 +61,33 @@ Each container receives one result:
 
 Results include an explanation and, for completed comparisons, the deployed and current **platform manifest** digests. Results are report data: the command exits zero when inventory succeeds, including when a check is inconclusive or an update is available. Docker inventory failures retain a nonzero exit code.
 
+### Private GHCR packages
+
+Use a GitHub personal access token (classic) with `read:packages` and an account that can read the package. Authorize the token for your organization if it requires SSO. [GitHub Container Registry authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic)
+
+On Linux, create the token file as the user who runs HappyDocker. Keep it owned by that user with mode `0600`.
+
+```sh
+umask 077
+mkdir -p "$HOME/.config/happydocker"
+touch "$HOME/.config/happydocker/ghcr.pat"
+chmod 0600 "$HOME/.config/happydocker/ghcr.pat"
+```
+
+Save the PAT alone in that file using a trusted editor or secret manager, then set the username and file path in the process environment.
+
+```sh
+export HAPPYDOCKER_GHCR_USERNAME='your-github-username'
+export HAPPYDOCKER_GHCR_TOKEN_FILE="$HOME/.config/happydocker/ghcr.pat"
+happydocker check
+```
+
+`HAPPYDOCKER_GHCR_TOKEN` is an alternative for environments that inject secrets directly. Set exactly one token source. The file is read at `check` startup and only trailing CR/LF characters are removed. Whitespace inside the token, leading or trailing spaces, and a byte order mark are rejected. A future systemd service can point `HAPPYDOCKER_GHCR_TOKEN_FILE` at a file supplied by `LoadCredential=` through its credentials directory. [systemd credentials documentation](https://systemd.io/CREDENTIALS/)
+
+Leave all three variables unset for anonymous access. Metadata requests start anonymously and use a cached bearer token when available. If GHCR challenges the request, configured credentials are sent as Basic authentication only to `https://ghcr.io/token`. That request never follows redirects and requests only the repository's `pull` scope. A cached bearer rejected with HTTP 401 can be replaced through one challenge exchange per metadata request. HTTP 403 ends the request and evicts any rejected cached bearer.
+
+Invalid configuration, including an unreadable or missing token file, fails `check` at startup. Private packages without credentials and packages that reject the configured credentials report `Authentication required` with distinct explanations. Check PAT expiry, scope, and package permissions if access is denied. Unsafe challenges or credential exchange redirects also report `Authentication required`. Rate limits and network failures report `Registry unavailable`.
+
 ### Docker image store compatibility
 
 - **Legacy image store:** when `Descriptor` and `Identity` are absent/null, a matching repository digest is only a candidate for content verification. The checker fetches and resolves it, then requires its configuration digest to equal the Docker image ID. This preserves legacy checks, including unqualified names with candidate repository digests, without claiming pull provenance. Successful results explicitly say that provenance remains unavailable; `scan` keeps those references ambiguous. A locally named digest that cannot be verified against registry content cannot produce an update result.
@@ -78,7 +105,7 @@ Missing optional properties on older Docker versions are accepted through map-ba
 - Configuration digests, platform manifest digests, and index digests are separate identities. Legacy IDs bind to configuration digests; descriptor-backed IDs bind to the exact descriptor content. Update comparisons always use the resolved platform manifests, never an index digest versus a configuration digest or child manifest.
 - Returned bytes are checked against requested digests, advertised digest headers, and descriptor sizes. SHA-256 platform-manifest hashes are computed from the returned bytes for comparison. A manifest changing while its configuration stays the same produces `Unknown`, since repackaging is not reliable evidence of a different deployed image.
 - The deployed manifest must still be readable in the registry. Missing/removed manifests, unsupported schemas or digest algorithms, malformed metadata, and config/platform inconsistencies produce `Unknown`.
-- Only anonymous access is supported, including a bounded bearer-token challenge exchange with repository-scoped, pull-only tokens. Docker login credentials and credential helpers are not read; private images usually report `Authentication required`. Tokens, response bodies, signed URLs, and raw network exception details are not printed.
+- Docker Hub uses anonymous access. GHCR optionally uses the credential exchange described above, with one configured account per command. HappyDocker uses explicit configuration and does not read Docker login credentials or credential helpers. Tokens, authorization headers, response bodies, signed URLs, and raw network exception details are omitted from reports.
 - Initial requests target only `registry-1.docker.io` or `ghcr.io`; token requests target only `auth.docker.io/token` or `ghcr.io/token`. HTTPS redirects within the same host are bounded to three hops. Configuration blobs may additionally redirect to Docker's documented `production.cloudfront.docker.com` or GitHub's `pkg-containers.githubusercontent.com`; bearer tokens are removed on that hop. All other cross-host redirects, non-HTTPS URLs, credentials in URLs, and nonstandard ports are rejected. Other vendor CDN endpoints may therefore report `Registry unavailable`.
 - Each metadata request, including its authentication and redirect exchange, has a 15-second deadline and bounded response size. HTTP 429 is reported without an immediate retry; `Retry-After` (or a default one-minute cooldown) suppresses further requests to that registry for the remainder of the cooldown within this command. There are no background retries or persistent state.
 

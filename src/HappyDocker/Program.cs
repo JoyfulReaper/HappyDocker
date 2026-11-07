@@ -13,8 +13,17 @@ try
 {
     if (args[0] == "scan")
         return await DockerScan.RunAsync(arguments => RunDockerAsync(arguments), Console.Out, Console.Error);
-    using var registry = new RegistryClient();
+    GhcrCredentials? credentials = GhcrCredentials.Load(
+        Environment.GetEnvironmentVariable(GhcrCredentials.UsernameVariable),
+        Environment.GetEnvironmentVariable(GhcrCredentials.TokenFileVariable),
+        Environment.GetEnvironmentVariable(GhcrCredentials.TokenVariable));
+    using var registry = new RegistryClient(ghcrCredentials: credentials);
     return await DockerCheck.RunAsync(arguments => RunDockerAsync(arguments), new RegistryUpdateChecker(registry), Console.Out, Console.Error);
+}
+catch (GhcrConfigurationException exception)
+{
+    Console.Error.WriteLine(exception.Message);
+    return 1;
 }
 catch (JsonException exception)
 {
@@ -36,6 +45,10 @@ static async Task<DockerCommandResult> RunDockerAsync(params string[] arguments)
         UseShellExecute = false,
         CreateNoWindow = true
     };
+
+    startInfo.Environment.Remove(GhcrCredentials.UsernameVariable);
+    startInfo.Environment.Remove(GhcrCredentials.TokenFileVariable);
+    startInfo.Environment.Remove(GhcrCredentials.TokenVariable);
 
     foreach (string argument in arguments)
     {

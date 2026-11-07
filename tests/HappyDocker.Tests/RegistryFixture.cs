@@ -36,7 +36,8 @@ internal sealed class RegistryFixture : IDisposable
     internal Func<HttpRequestMessage, HttpResponseMessage?>? Intercept { get; set; }
     private readonly Dictionary<string, byte[]> routes = new(StringComparer.Ordinal);
 
-    internal RegistryFixture(string registry = "docker.io", string repository = "library/nats", string tag = "2.14.3-alpine")
+    internal RegistryFixture(string registry = "docker.io", string repository = "library/nats", string tag = "2.14.3-alpine",
+        GhcrCredentials? ghcrCredentials = null)
     {
         Registry = registry; Repository = repository; Tag = tag;
         OldManifest = Manifest(OldConfig);
@@ -54,7 +55,7 @@ internal sealed class RegistryFixture : IDisposable
             var uri = request.RequestUri!;
             Requests.Add(new(uri.Host, Uri.UnescapeDataString(uri.AbsolutePath), uri.Query, request.Headers.Authorization?.ToString()));
             return Task.FromResult(Intercept?.Invoke(request) ?? Respond(request));
-        }));
+        }), ghcrCredentials: ghcrCredentials);
         Checker = new(Client);
     }
 
