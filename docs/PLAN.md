@@ -56,13 +56,11 @@ Remaining milestone work:
 
 ## Milestone 3 — vulnerabilities (new task to add to WSIWOT)
 
-- Integrate Trivy or another maintained scanner as a replaceable adapter; don't build our own CVE database.
-- Scan the **specific deployed image digest**, and record scanner database timestamp, distribution, package/fixed versions, advisory ID, and source.
-- Handle images that lack standard OS packages and distroless or scratch images.
-- A vulnerability may be newly disclosed even when the image digest has not changed. Schedule rescans accordingly.
-- Differentiate `vulnerability in installed package`, `fix available`, `no fix known`, and `known reachable/exploitable` only where evidence supports it.
-- Avoid publishing private image names or raw scan results to external services without explicit configuration.
-- Rate-limit scanning and cap disk/cache use.
+**First stage implemented.** `happydocker vulnerabilities` invokes a separately installed Trivy CLI against immutable Docker image IDs and scans shared images once. Legacy configuration IDs require recognized Docker store evidence when descriptors are absent. For containerd, verification requires a directly inspectable deployed platform manifest and matching Trivy-reported Docker ID, platform, and ordered layer IDs. A child reachable only through an index or an unverified configuration digest remains incomplete. Scanner and database failures also produce incomplete results. Package coverage is tracked separately from findings.
+
+The scan uses the local Docker image source, vulnerability analysis, and offline dependency resolution. Trivy's normal database updates remain enabled. The command reports cache freshness when available and holds JSON reports in memory. Keep room for the database cache and temporary image exports. Docker access is privileged and must be limited to the intended daemon. See the [installation, usage, and limitations in the README](../README.md#scan-deployed-images-for-vulnerabilities).
+
+Remaining work includes live validation with both Docker image stores and the deployed Trivy version. Validate local immutable ID resolution, platform metadata, and disk usage during export. A later stage can use database freshness to plan rescans. Package presence is evidence for a finding, and exploitability analysis requires additional application evidence.
 
 **Definition of done:** A fixture can flag an affected Alpine musl package, show the fixed package/version, and explicitly avoid asserting that NATS exercises the vulnerable libc function.
 

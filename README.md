@@ -2,7 +2,7 @@
 
 **Read-only Docker image update and vulnerability monitoring.**
 
-HappyDocker is a .NET 10 tool with a working read-only Docker inventory CLI and mutable-tag update checks for Docker Hub and GHCR. Vulnerability monitoring is planned. It **does not** automatically update or restart production containers.
+HappyDocker is a .NET 10 tool for read-only Docker inventory, mutable-tag update checks for Docker Hub and GHCR, and local-image vulnerability scanning with Trivy.
 
 ## Goals
 
@@ -27,7 +27,26 @@ Implemented:
 - `check` determines whether the configured tag resolves to a different image for the deployed platform. Docker Hub and GHCR use anonymous access by default. Private GHCR packages can use explicitly configured credentials.
 - Registry tests use mocked HTTP responses, including authentication, redirects, rate limits, timeouts, multi-architecture indexes, unchanged NATS version tags, both Docker image stores, synthetic local repository digests, and incomplete or inconsistent metadata. Clanker's pulled NATS and build-only HappyQOTD identity examples are regression fixtures.
 
-Newer-version discovery, vulnerability scanning, persistence, scheduling, notifications, and automatic updates are not implemented.
+- `vulnerabilities` scans verified local images for known package vulnerabilities and reports results per running container.
+
+Newer-version discovery, persistence, scheduling, notifications, and automatic updates remain planned.
+
+### Scan deployed images for vulnerabilities
+
+Install the standalone Trivy CLI using the instructions for your OS, then verify that `trivy --version` works for the user running HappyDocker. Use a release that supports `--disable-telemetry`, `--skip-version-check`, and `--image-src docker`. [Trivy installation](https://trivy.dev/docs/latest/getting-started/installation/) · [Trivy image options](https://trivy.dev/docs/latest/references/configuration/cli/trivy_image/)
+
+```sh
+happydocker vulnerabilities
+# Or from the source checkout:
+dotnet run --project src/HappyDocker -- vulnerabilities
+```
+
+- HappyDocker reuses the Docker inventory and scans each verified immutable image and platform once per command, including locally built and digest-pinned images. Each container gets its own summary and HIGH/CRITICAL details, including findings with no known fix.
+- The Trivy image source is Docker only. HappyDocker verifies the reported OS and architecture, and checks the variant when both sides provide one. Legacy scans verify the configuration ID. For descriptor-less images, HappyDocker requires a recognized classic `overlay2` driver and backing filesystem status. Missing or unrecognized driver metadata leaves the scan incomplete. [Docker classic overlay2 driver](https://docs.docker.com/engine/storage/drivers/overlayfs-driver/) · [Docker containerd store detection](https://docs.docker.com/engine/storage/containerd/)
+- Trivy's Docker backend populates `Metadata.ImageID` from Docker inspect. On the containerd store, HappyDocker verifies a directly inspectable platform manifest by digest, descriptor, platform, and ordered uncompressed layer IDs. Docker inspect does not expose the manifest's configuration digest, so a report that supplies a different config ID remains incomplete even when its layers match. For a containerd index, the deployed child manifest must be independently addressable in Docker's local image store. If Docker exposes only the parent index, the result is incomplete. A platform-specific inspect of that index can identify a child but does not give Trivy's Docker backend a directly scannable child ID. [Trivy Docker image implementation](https://github.com/aquasecurity/trivy/blob/main/pkg/fanal/image/daemon/image.go) · [Docker image lookup implementation](https://github.com/moby/moby/blob/master/daemon/containerd/image.go)
+- Trivy performs package vulnerability analysis with telemetry, version checks, and optional dependency resolution disabled. It uses its normal vulnerability database cache and can download or refresh the vulnerability and Java databases as needed. A first run needs an existing usable cache or access to Trivy's database distribution endpoints. Offline runs can fail when a database is missing, unusable, or due for refresh. HappyDocker reads the cache timestamp from `trivy version --format json` when available. Older releases that reject the subcommand use `trivy --version --format json`. [Trivy database behavior](https://trivy.dev/docs/latest/configuration/db/) · [Trivy version command](https://trivy.dev/docs/latest/references/configuration/cli/trivy_version/)
+- Allow disk space for Trivy's persistent databases and temporary local image exports, which can be large. HappyDocker keeps analysis caching in memory and does not save raw reports. `TRIVY_CACHE_DIR` can point to a writable cache directory. The scanner inherits only selected OS, Docker connection, proxy, certificate, and cache settings. HappyDocker credentials are excluded, and Trivy YAML and other `TRIVY_*` overrides are disabled. [Trivy Docker export implementation](https://github.com/aquasecurity/trivy/blob/main/pkg/fanal/image/daemon/image.go)
+- Trivy needs access to the same Docker daemon and local image contents as the inventory command. Docker socket access is privileged even for a read-only workflow. The command distinguishes findings, no findings for recognized packages, unsupported or unrecognized packages, and incomplete scans. Findings identify vulnerable packages present in an image. Application reachability and exploitability require separate analysis. The command returns a nonzero exit code for incomplete scans or inventory failures. Findings and unsupported package coverage are reported as scan results.
 
 ### Run locally
 
@@ -125,7 +144,7 @@ See [the project plan](docs/PLAN.md) for scope, milestones, design constraints, 
 - **Interface:** Local read-only console report; JSON output planned
 - **State:** SQLite when change tracking is introduced
 - **Notifications:** ntfy
-- **Security scanning:** Existing scanner (Trivy or equivalent), with exact digest/version reported
+- **Security scanning:** Trivy CLI, with immutable local image identity and database freshness where available
 - **Registries:** Docker Hub and GitHub Container Registry (GHCR) first
 
 ## Safety principles
