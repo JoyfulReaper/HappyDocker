@@ -6,6 +6,7 @@ namespace HappyDocker;
 public sealed class RegistryUpdateChecker(RegistryClient registry)
 {
     private sealed record PlatformManifest(string Digest, string ConfigDigest, long ConfigSize, int LayerCount, bool HasPlatformDescriptor);
+    internal sealed record LocalDeployment(DockerImageRow Image, ImageDescriptor? Descriptor, ImageDescriptor? ContainerDescriptor);
 
     public async Task<UpdateResult> CheckAsync(DockerInspectRow container, DockerImageRow? image,
         CancellationToken cancellationToken = default)
@@ -31,38 +32,10 @@ public sealed class RegistryUpdateChecker(RegistryClient registry)
             && !(image?.RepoDigests ?? []).Select(ImageReference.Parse).Any(r => r.IsDigestPinned
                 && r.Registry == reference.Registry && r.Repository == reference.Repository))
             return new(UpdateStatus.Skipped, "Ambiguous reference without pull identity or a candidate deployed repository digest.");
-        if (image is null || image.Id != container.ImageId || !ImageReference.IsSupportedDigest(image.Id ?? "")
-            || string.IsNullOrWhiteSpace(image.Os) || string.IsNullOrWhiteSpace(image.Architecture))
-            return new(UpdateStatus.Unknown, "Missing or inconsistent deployed image identity or platform metadata.");
-
-        ImageDescriptor? descriptor = DockerImageIdentity.ReadDescriptor(image.Descriptor);
-        if (hasDescriptor && (descriptor is null || descriptor.Digest != image.Id))
-            return new(UpdateStatus.Unknown, "Image ID and image descriptor are invalid or inconsistent.");
+        var (deployment, error) = ReadDeployment(container, image);
+        if (deployment is null) return new(UpdateStatus.Unknown, error!);
+        (image, ImageDescriptor? descriptor, ImageDescriptor? containerDescriptor) = deployment;
         ImageDigestKind identityKind = descriptor?.Kind ?? ImageDigestKind.Configuration;
-        ImageDescriptor? containerDescriptor = DockerImageIdentity.ReadDescriptor(container.ImageManifestDescriptor);
-        if (DockerImageIdentity.Present(container.ImageManifestDescriptor)
-            && containerDescriptor?.Kind != ImageDigestKind.PlatformManifest)
-            return new(UpdateStatus.Unknown, "Container platform manifest descriptor is invalid or unsupported.");
-        if (identityKind == ImageDigestKind.ImageIndex && containerDescriptor is null)
-            return new(UpdateStatus.Unknown, "Index image ID needs the container's platform manifest descriptor to identify the deployed platform.");
-        if (DockerImageIdentity.Present(containerDescriptor?.Platform))
-        {
-            JsonElement platform = containerDescriptor!.Platform!.Value;
-            var deployedPlatform = image with
-            {
-                Os = JsonValue.String(platform, "os"), Architecture = JsonValue.String(platform, "architecture"),
-                Variant = JsonValue.String(platform, "variant")
-            };
-            if (string.IsNullOrWhiteSpace(deployedPlatform.Os) || string.IsNullOrWhiteSpace(deployedPlatform.Architecture)
-                || !MatchesPlatform(platform, deployedPlatform, false)
-                || (identityKind != ImageDigestKind.ImageIndex && !MatchesPlatform(platform, image, false)))
-                return new(UpdateStatus.Unknown, "Container and image platform metadata are inconsistent or incomplete.");
-            // An index's image inspection can describe the daemon's default platform, not this container.
-            image = deployedPlatform;
-        }
-        if ((!string.IsNullOrWhiteSpace(container.Platform) && container.Platform != image.Os)
-            || (DockerImageIdentity.Present(descriptor?.Platform) && !MatchesPlatform(descriptor!.Platform!.Value, image, false)))
-            return new(UpdateStatus.Unknown, "Container and image descriptor platforms disagree.");
 
         string[] deployedDigests = (image.RepoDigests ?? []).Select(ImageReference.Parse)
             .Where(r => r.IsDigestPinned && r.Registry == reference.Registry && r.Repository == reference.Repository)
@@ -113,6 +86,61 @@ public sealed class RegistryUpdateChecker(RegistryClient registry)
         }
         catch (RegistryException exception) { return exception.Result; }
         catch (JsonException) { return new(UpdateStatus.Unknown, "Registry returned malformed image metadata."); }
+    }
+
+    internal static (LocalDeployment? Deployment, string? Error) ReadDeployment(DockerInspectRow container, DockerImageRow? image)
+    {
+        if (image is null || image.Id != container.ImageId || !ImageReference.IsSupportedDigest(image.Id ?? "")
+            || string.IsNullOrWhiteSpace(image.Os) || string.IsNullOrWhiteSpace(image.Architecture))
+            return (null, "Missing or inconsistent deployed image identity or platform metadata.");
+
+        ImageDescriptor? descriptor = DockerImageIdentity.ReadDescriptor(image.Descriptor);
+        if (DockerImageIdentity.Present(image.Descriptor) && (descriptor is null || descriptor.Digest != image.Id))
+            return (null, "Image ID and image descriptor are invalid or inconsistent.");
+        ImageDigestKind identityKind = descriptor?.Kind ?? ImageDigestKind.Configuration;
+        ImageDescriptor? containerDescriptor = DockerImageIdentity.ReadDescriptor(container.ImageManifestDescriptor);
+        if (DockerImageIdentity.Present(container.ImageManifestDescriptor)
+            && containerDescriptor?.Kind != ImageDigestKind.PlatformManifest)
+            return (null, "Container platform manifest descriptor is invalid or unsupported.");
+        if (identityKind == ImageDigestKind.ImageIndex && containerDescriptor is null)
+            return (null, "Index image ID needs the container's platform manifest descriptor to identify the deployed platform.");
+        if (DockerImageIdentity.Present(containerDescriptor?.Platform))
+        {
+            JsonElement platform = containerDescriptor!.Platform!.Value;
+            var deployedPlatform = image with
+            {
+                Os = JsonValue.String(platform, "os"), Architecture = JsonValue.String(platform, "architecture"),
+                Variant = JsonValue.String(platform, "variant")
+            };
+            if (string.IsNullOrWhiteSpace(deployedPlatform.Os) || string.IsNullOrWhiteSpace(deployedPlatform.Architecture)
+                || !MatchesPlatform(platform, deployedPlatform, false)
+                || (identityKind != ImageDigestKind.ImageIndex && !MatchesPlatform(platform, image, false)))
+                return (null, "Container and image platform metadata are inconsistent or incomplete.");
+            // An index's image inspection can describe the daemon's default platform, not this container.
+            image = deployedPlatform;
+        }
+        if ((!string.IsNullOrWhiteSpace(container.Platform) && container.Platform != image.Os)
+            || (DockerImageIdentity.Present(descriptor?.Platform) && !MatchesPlatform(descriptor!.Platform!.Value, image, false)))
+            return (null, "Container and image descriptor platforms disagree.");
+        return (new(image, descriptor, containerDescriptor), null);
+    }
+
+    internal async Task<(bool Verified, string Detail)> VerifyCandidatePlatformAsync(ImageReference reference, string tag,
+        DockerImageRow platform, CancellationToken cancellationToken)
+    {
+        try
+        {
+            PlatformManifest manifest = await ResolveAsync(reference, tag, platform, new(StringComparer.Ordinal), 0, false, cancellationToken);
+            await VerifyConfigAsync(reference, manifest, platform, cancellationToken);
+            return (true, $"Registry metadata matches {platform.Os}/{platform.Architecture}"
+                + (string.IsNullOrEmpty(platform.Variant) ? "." : $"/{platform.Variant}."));
+        }
+        catch (RegistryException exception)
+        {
+            string retry = exception.Result.RetryAfter is { } time ? $" Retry after {time:O}." : "";
+            return (false, $"{DockerCheck.Label(exception.Result.Status)}. {exception.Result.Reason}{retry}");
+        }
+        catch (JsonException) { return (false, "Registry returned malformed image metadata."); }
     }
 
     private async Task VerifyConfigAsync(ImageReference reference, PlatformManifest manifest, DockerImageRow image,

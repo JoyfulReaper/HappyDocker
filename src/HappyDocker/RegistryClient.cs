@@ -51,24 +51,13 @@ public sealed class RegistryClient : IDisposable
 
     public static bool Supports(string? registry) => registry is "docker.io" or "ghcr.io";
 
-    internal async Task<RegistryDocument> GetAsync(string registry, string repository, string reference,
+    internal Task<RegistryDocument> GetAsync(string registry, string repository, string reference,
         bool config, CancellationToken cancellationToken)
     {
-        if (!Supports(registry)) throw new RegistryException(UpdateStatus.UnsupportedRegistry, "Registry is not supported.");
-        if (rateLimits.TryGetValue(registry, out DateTimeOffset until) && until > DateTimeOffset.UtcNow)
-            throw new RegistryException(UpdateStatus.RegistryUnavailable, "Registry rate limited; retry later.", until);
-
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(timeout);
-        try
+        string host = registry == "docker.io" ? "registry-1.docker.io" : "ghcr.io";
+        var uri = new Uri($"https://{host}/v2/{repository}/{(config ? "blobs" : "manifests")}/{Uri.EscapeDataString(reference)}");
+        return ReadAsync(uri, registry, repository, config, 4 * 1024 * 1024, (response, bytes) =>
         {
-            string host = registry == "docker.io" ? "registry-1.docker.io" : "ghcr.io";
-            var uri = new Uri($"https://{host}/v2/{repository}/{(config ? "blobs" : "manifests")}/{Uri.EscapeDataString(reference)}");
-            string tokenKey = registry + "/" + repository;
-            tokens.TryGetValue(tokenKey, out string? token);
-            using HttpResponseMessage response = await GetAuthorizedAsync(uri, registry, repository, tokenKey, token, config, deadline.Token);
-            CheckStatus(response, registry);
-            byte[] bytes = await ReadBoundedAsync(response, 4 * 1024 * 1024, deadline.Token);
             string digest = ContentDigest.Compute(bytes);
             if (ImageReference.IsSupportedDigest(reference) && !ContentDigest.Matches(bytes, reference))
                 throw new RegistryException(UpdateStatus.Unknown, "Registry content does not match the requested digest.");
@@ -78,7 +67,42 @@ public sealed class RegistryClient : IDisposable
                 if (advertised.Length != 1 || !ContentDigest.Matches(bytes, advertised[0]))
                     throw new RegistryException(UpdateStatus.Unknown, "Registry digest header is inconsistent with its content.");
             }
-            return new(bytes, digest, response.Content.Headers.ContentType?.MediaType);
+            return new RegistryDocument(bytes, digest, response.Content.Headers.ContentType?.MediaType);
+        }, cancellationToken);
+    }
+
+    internal static Uri DockerHubTagEndpoint(string repository) => new($"https://registry-1.docker.io/v2/{repository}/tags/list");
+
+    internal Task<(byte[] Bytes, string[] Links)> GetTagPageAsync(string repository, int pageSize, string? last,
+        CancellationToken cancellationToken)
+    {
+        string cursor = last is null ? "" : $"&last={Uri.EscapeDataString(last)}";
+        var uri = new Uri(FormattableString.Invariant($"{DockerHubTagEndpoint(repository)}?n={pageSize}{cursor}"));
+        return ReadAsync(uri, "docker.io", repository, false, 64 * 1024, (response, bytes) =>
+        {
+            if (response.StatusCode != HttpStatusCode.OK)
+                throw new RegistryException(UpdateStatus.Unknown, "Registry returned an unexpected tag page status.");
+            return (bytes, response.Headers.TryGetValues("Link", out var links) ? links.ToArray() : []);
+        }, cancellationToken, allowRedirects: false);
+    }
+
+    private async Task<T> ReadAsync<T>(Uri uri, string registry, string repository, bool config, int limit,
+        Func<HttpResponseMessage, byte[], T> read, CancellationToken cancellationToken, bool allowRedirects = true)
+    {
+        if (!Supports(registry)) throw new RegistryException(UpdateStatus.UnsupportedRegistry, "Registry is not supported.");
+        if (rateLimits.TryGetValue(registry, out DateTimeOffset until) && until > DateTimeOffset.UtcNow)
+            throw new RegistryException(UpdateStatus.RegistryUnavailable, "Registry rate limited; retry later.", until);
+
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(timeout);
+        try
+        {
+            string tokenKey = registry + "/" + repository;
+            tokens.TryGetValue(tokenKey, out string? token);
+            using HttpResponseMessage response = await GetAuthorizedAsync(uri, registry, repository, tokenKey, token, config, deadline.Token, allowRedirects);
+            CheckStatus(response, registry);
+            byte[] bytes = await ReadBoundedAsync(response, limit, deadline.Token);
+            return read(response, bytes);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -95,12 +119,12 @@ public sealed class RegistryClient : IDisposable
     }
 
     private async Task<HttpResponseMessage> GetAuthorizedAsync(Uri uri, string registry, string repository,
-        string key, string? token, bool config, CancellationToken cancellationToken)
+        string key, string? token, bool config, CancellationToken cancellationToken, bool allowRedirects)
     {
         // Only config metadata may use these documented vendor CDN endpoints; never manifests or tokens.
         string? cdnHost = !config ? null : registry == "docker.io"
             ? "production.cloudfront.docker.com" : "pkg-containers.githubusercontent.com";
-        HttpResponseMessage response = await SendAsync(uri, token, cancellationToken, cdnHost);
+        HttpResponseMessage response = await SendAsync(uri, token, cancellationToken, cdnHost, allowRedirects);
         if (response.StatusCode != HttpStatusCode.Unauthorized)
         {
             if (response.StatusCode == HttpStatusCode.Forbidden) tokens.Remove(key);
@@ -122,7 +146,7 @@ public sealed class RegistryClient : IDisposable
             if (string.IsNullOrEmpty(newToken) || newToken.Length > 16000
                 || newToken.Any(c => !char.IsAsciiLetterOrDigit(c) && !"-._~+/=".Contains(c)))
                 throw new RegistryException(UpdateStatus.AuthenticationRequired, "Registry bearer token response was invalid.");
-            HttpResponseMessage retry = await SendAsync(uri, newToken, cancellationToken, cdnHost);
+            HttpResponseMessage retry = await SendAsync(uri, newToken, cancellationToken, cdnHost, allowRedirects);
             if (retry.IsSuccessStatusCode) tokens[key] = newToken;
             return retry;
         }
@@ -177,7 +201,7 @@ public sealed class RegistryClient : IDisposable
     }
 
     private async Task<HttpResponseMessage> SendAsync(Uri uri, string? token, CancellationToken cancellationToken,
-        string? cdnHost = null)
+        string? cdnHost = null, bool allowRedirects = true)
     {
         string originalHost = uri.Host;
         for (int redirects = 0; redirects <= 3; redirects++)
@@ -194,7 +218,7 @@ public sealed class RegistryClient : IDisposable
             if ((int)response.StatusCode is not (301 or 302 or 303 or 307 or 308)) return response;
             Uri? location = response.Headers.Location;
             response.Dispose();
-            if (location is null || !Uri.TryCreate(uri, location, out Uri? next)
+            if (!allowRedirects || location is null || !Uri.TryCreate(uri, location, out Uri? next)
                 || next.Scheme != "https" || next.Port != 443
                 || (next.Host != uri.Host && !(uri.Host == originalHost && next.Host == cdnHost))
                 || next.UserInfo.Length != 0 || next.Fragment.Length != 0 || redirects == 3)

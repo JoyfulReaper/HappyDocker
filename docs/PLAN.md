@@ -39,20 +39,20 @@ The comparison resolves deployed content and the current tag to exact platform m
 
 Index IDs require the running container's platform manifest descriptor to avoid selecting the daemon's default platform accidentally. Supplied container platform metadata drives selection, and its digest/size/media type must agree with the manifest selected from the deployed index. Any candidate repository digest must resolve consistently with the descriptor. An index changing only for another architecture does not imply an update. Digest pins, build-only identities, and local-only references are skipped; mixed or contradictory provenance and insufficient platform/identity evidence produce `Unknown`. Digest, size, media-type, and configuration verification remain mandatory.
 
-Reports distinguish up to date, update available, unknown/insufficient metadata, unsupported registry, authentication required, registry unavailable, and skipped references. Registry and auth destinations are restricted to supported hosts and documented config CDN redirects. Bearer tokens stay on their registry host. Persistent state, scheduling, and newer-version discovery remain out of scope for this stage.
+Reports distinguish up to date, update available, unknown/insufficient metadata, unsupported registry, authentication required, registry unavailable, and skipped references. Registry and auth destinations are restricted to supported hosts and documented config CDN redirects. Bearer tokens stay on their registry host.
 
 `check` supports optional private GHCR access through `HAPPYDOCKER_GHCR_USERNAME` and a classic PAT with `read:packages`. `HAPPYDOCKER_GHCR_TOKEN_FILE` is preferred and works with a future systemd credential file. `HAPPYDOCKER_GHCR_TOKEN` is an alternative for secret injection. Anonymous access remains the default. The PAT is used only for the validated GHCR token exchange, with redirects disabled and a repository-specific `pull` scope. Invalid startup configuration, denied credentials, unsafe challenges, and registry outages have separate diagnostics. See the Linux `0600` token-file example and limitations in the [README](../README.md#private-ghcr-packages).
+
+**Patch discovery implemented:** `versions --repo <repository>` handles explicitly selected Docker Hub repositories with matching pull provenance. It uses numeric patch comparison within the deployed major/minor version and preserves the variant suffix exactly. Tag enumeration uses bounded Registry API pagination and anonymous bearer auth. The report identifies incomplete enumeration and separates platform verification from tag matching. A patch candidate is a review input, and its compatibility and security still require separate evidence. See the [discovery rules and examples](../README.md#discover-newer-patch-tags).
 
 Remaining milestone work:
 
 - Validate the revised Docker Hub/GHCR comparisons against legacy and containerd Docker stores, including Clanker's pulled NATS and locally built HappyQOTD, cross-platform containers, and registry/platform failures. The supplied NATS digest/identity excerpt is preserved in a metadata fixture; comparison fixtures use generated content with real computed digests rather than invented payloads for that digest.
 - Validate private GHCR access with a least-privilege PAT in a deployed environment and evaluate additional documented CDN endpoints as needed.
-- **Newer-version suggestion:** where safe to infer from a recognized tag family (e.g. `2.14.3-alpine` -> `2.14.8-alpine`), suggest a candidate but never assume semantic version tags exist or that a higher version is compatible.
-- Keep any future version suggestions conservative with `latest`, `dev`, moving major tags, prereleases, and variant suffixes.
 - Retain digest-pinned images for future vulnerability scanning while continuing to skip mutable-tag comparisons.
-- Add a distinct `candidate newer tag` result only when newer-version discovery is implemented.
+- Validate the explicit opt-in command against a live Docker Hub repository and deployed Docker metadata, including large tag sets and containerd platform descriptors.
 
-**First-stage regression fixture:** The NATS `2.14.3-alpine` tag is unchanged while a patched `2.14.8-alpine` tag exists elsewhere. The implemented checker reports up to date, never lists tags, and never requests the newer tag. Qualified newer-version suggestions remain future work.
+**Regression fixtures:** The NATS configured-tag check reports up to date when its deployed manifest is unchanged. Separate version-discovery fixtures compare hypothetical patch tags, test variant boundaries, and verify candidate platform metadata.
 
 ## Milestone 3 — vulnerabilities (new task to add to WSIWOT)
 
@@ -112,7 +112,7 @@ Interfaces should be testable independently. Early development uses mocked regis
 ## Decisions to revisit before implementation
 
 1. Does the initial CLI use the Docker Engine API through a library, or invoke `docker` for its read-only commands? Consider maintenance and permission boundaries.
-2. Should detection of newer tags be limited to explicit opt-in rules per repository? Default conservative.
+2. Should opt-in patch discovery expand to additional registries once their tag-list and auth behavior is validated?
 3. Should initial security findings require `fix available` before notifying, while still keeping unfixed findings in reports?
 4. Which Trivy invocation and image-access mode avoids unnecessarily elevating the scanning service?
 5. What minimum inventory information may safely be sent in ntfy messages from private hosts?

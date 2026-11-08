@@ -56,7 +56,7 @@ public sealed record ImageReference(
         {
             tag = name[(colon + 1)..];
             name = name[..colon];
-            if (!Matches(tag, "[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}"))
+            if (!IsValidTag(tag))
                 return Failure(ImageReferenceKind.Invalid, "Invalid image tag.");
         }
 
@@ -105,6 +105,8 @@ public sealed record ImageReference(
             Reason = provenance.Reason
         };
     }
+
+    internal static bool IsValidTag(string value) => Matches(value, "[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}");
 
     internal static bool IsSupportedDigest(string value)
     {

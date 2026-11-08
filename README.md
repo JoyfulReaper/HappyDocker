@@ -25,9 +25,29 @@ Implemented:
 - Missing image metadata is reported as unknown. Conflicting duplicate image inspection records are rejected with a diagnostic. Partial image-inspection failures still produce an inventory from available metadata and retain Docker's nonzero exit code.
 - Unit tests cover parsing, normalization, classification, metadata handling, and scan commands/output using fixtures, without a Docker daemon.
 - `check` determines whether the configured tag resolves to a different image for the deployed platform. Docker Hub and GHCR use anonymous access by default. Private GHCR packages can use explicitly configured credentials.
+- `versions` discovers newer patch-tag candidates for running containers in explicitly selected Docker Hub repositories.
 - Registry tests use mocked HTTP responses, including authentication, redirects, rate limits, timeouts, multi-architecture indexes, unchanged NATS version tags, both Docker image stores, synthetic local repository digests, and incomplete or inconsistent metadata. Clanker's pulled NATS and build-only HappyQOTD identity examples are regression fixtures.
 
-Newer-version discovery, vulnerability scanning, persistence, scheduling, notifications, and automatic updates are not implemented.
+Vulnerability scanning, persistence, scheduling, notifications, and automatic updates remain planned.
+
+### Discover newer patch tags
+
+```sh
+happydocker versions --repo docker.io/library/nats
+happydocker versions --repo nats --repo docker.io/library/redis
+# From the source checkout:
+dotnet run --project src/HappyDocker -- versions --repo docker.io/library/nats
+```
+
+Each `--repo` opts in a repository without a tag or digest. Unqualified repository names use Docker Hub defaults. HappyDocker lists tags only for selected Docker Hub repositories used by running containers with recognized version tags and matching Docker pull provenance. Local builds, ambiguous provenance, missing image identity, digest pins, and unsupported registries are reported as skips. Older Docker metadata without pull provenance can therefore be insufficient for discovery. Shared repositories and candidate platform checks are reused across containers.
+
+Candidates must have the same numeric major and minor version, a greater numeric patch, and exactly the same suffix, including case. The suffix is an opaque variant. For example, hypothetical `2.14.9-alpine` would match `2.14.8-alpine`, while `2.15.0-alpine` and `2.14.9` would be excluded. The command rejects moving aliases, commit-like tags, recognizable prerelease markers, and ambiguous numeric formats. The example does not assert that a tag has been published.
+
+HappyDocker uses anonymous bearer authentication with Docker Hub's Registry API. It caps enumeration at 20 pages, 100 tags and 64 KiB per page, and 2,000 total tags. Continuation links must point to the same HTTPS tag-list endpoint with a valid cursor. A limit, invalid or missing continuation for a full page, or registry error produces an incomplete-enumeration notice. Rate-limit notices include Retry-After when available. [OCI registry tag listing and pagination](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-tags)
+
+The report shows each container's configured tag and the greatest matching patch observed, if any. It checks the candidate's manifest and config metadata for the deployed OS, architecture, and variant where available. Missing evidence is labeled **platform unverified**. The result is a candidate for review. A matching platform and patch number establish neither application compatibility nor security. A scan with no candidate reports only what was found among the tags examined.
+
+`versions` reports registry failures and incomplete enumeration in its output. Invalid options and Docker inventory failures return a nonzero exit code.
 
 ### Run locally
 

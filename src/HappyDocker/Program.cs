@@ -3,9 +3,10 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 
-if (args.Length != 1 || args[0] is not ("scan" or "check"))
+if (args.Length == 0 || (args[0] != "versions" && (args.Length != 1 || args[0] is not ("scan" or "check"))))
 {
     Console.Error.WriteLine("Usage: happydocker scan|check");
+    Console.Error.WriteLine("       happydocker versions --repo <repository> [--repo <repository> ...]");
     return 1;
 }
 
@@ -13,6 +14,11 @@ try
 {
     if (args[0] == "scan")
         return await DockerScan.RunAsync(arguments => RunDockerAsync(arguments), Console.Out, Console.Error);
+    if (args[0] == "versions")
+    {
+        using var anonymousRegistry = new RegistryClient();
+        return await DockerVersions.RunAsync(args[1..], RunDockerAsync, anonymousRegistry, Console.Out, Console.Error);
+    }
     GhcrCredentials? credentials = GhcrCredentials.Load(
         Environment.GetEnvironmentVariable(GhcrCredentials.UsernameVariable),
         Environment.GetEnvironmentVariable(GhcrCredentials.TokenFileVariable),
