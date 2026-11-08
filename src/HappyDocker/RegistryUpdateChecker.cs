@@ -31,7 +31,10 @@ public sealed class RegistryUpdateChecker(RegistryClient registry)
         if (provenance.Kind == ImageProvenanceKind.Missing && !hasDescriptor && !reference.HasExplicitRegistry
             && !(image?.RepoDigests ?? []).Select(ImageReference.Parse).Any(r => r.IsDigestPinned
                 && r.Registry == reference.Registry && r.Repository == reference.Repository))
-            return new(UpdateStatus.Skipped, "Ambiguous reference without pull identity or a candidate deployed repository digest.");
+            return new(UpdateStatus.Skipped, "Ambiguous reference without pull identity or a candidate deployed repository digest.")
+            {
+                SkippedForInsufficientEvidence = true
+            };
         var (deployment, error) = ReadDeployment(container, image);
         if (deployment is null) return new(UpdateStatus.Unknown, error!);
         (image, ImageDescriptor? descriptor, ImageDescriptor? containerDescriptor) = deployment;
@@ -125,7 +128,7 @@ public sealed class RegistryUpdateChecker(RegistryClient registry)
         return (new(image, descriptor, containerDescriptor), null);
     }
 
-    internal async Task<(bool Verified, string Detail)> VerifyCandidatePlatformAsync(ImageReference reference, string tag,
+    internal async Task<(bool Verified, string Detail, bool RequestFailed)> VerifyCandidatePlatformAsync(ImageReference reference, string tag,
         DockerImageRow platform, CancellationToken cancellationToken)
     {
         try
@@ -133,14 +136,15 @@ public sealed class RegistryUpdateChecker(RegistryClient registry)
             PlatformManifest manifest = await ResolveAsync(reference, tag, platform, new(StringComparer.Ordinal), 0, false, cancellationToken);
             await VerifyConfigAsync(reference, manifest, platform, cancellationToken);
             return (true, $"Registry metadata matches {platform.Os}/{platform.Architecture}"
-                + (string.IsNullOrEmpty(platform.Variant) ? "." : $"/{platform.Variant}."));
+                + (string.IsNullOrEmpty(platform.Variant) ? "." : $"/{platform.Variant}."), false);
         }
         catch (RegistryException exception)
         {
             string retry = exception.Result.RetryAfter is { } time ? $" Retry after {time:O}." : "";
-            return (false, $"{DockerCheck.Label(exception.Result.Status)}. {exception.Result.Reason}{retry}");
+            bool requestFailed = exception.Result.Status is UpdateStatus.AuthenticationRequired or UpdateStatus.RegistryUnavailable;
+            return (false, $"{DockerCheck.Label(exception.Result.Status)}. {exception.Result.Reason}{retry}", requestFailed);
         }
-        catch (JsonException) { return (false, "Registry returned malformed image metadata."); }
+        catch (JsonException) { return (false, "Registry returned malformed image metadata.", false); }
     }
 
     private async Task VerifyConfigAsync(ImageReference reference, PlatformManifest manifest, DockerImageRow image,

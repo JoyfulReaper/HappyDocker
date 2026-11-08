@@ -26,9 +26,10 @@ Implemented:
 - Unit tests cover parsing, normalization, classification, metadata handling, and scan commands/output using fixtures, without a Docker daemon.
 - `check` determines whether the configured tag resolves to a different image for the deployed platform. Docker Hub and GHCR use anonymous access by default. Private GHCR packages can use explicitly configured credentials.
 - `versions` discovers newer patch-tag candidates for running containers in explicitly selected Docker Hub repositories.
+- `check` and `versions` can record finding history in an opt-in local SQLite database.
 - Registry tests use mocked HTTP responses, including authentication, redirects, rate limits, timeouts, multi-architecture indexes, unchanged NATS version tags, both Docker image stores, synthetic local repository digests, and incomplete or inconsistent metadata. Clanker's pulled NATS and build-only HappyQOTD identity examples are regression fixtures.
 
-Vulnerability scanning, persistence, scheduling, notifications, and automatic updates remain planned.
+Vulnerability scanning, scheduling, notifications, and automatic updates remain planned.
 
 ### Discover newer patch tags
 
@@ -47,7 +48,30 @@ HappyDocker uses anonymous bearer authentication with Docker Hub's Registry API.
 
 The report shows each container's configured tag and the greatest matching patch observed, if any. It checks the candidate's manifest and config metadata for the deployed OS, architecture, and variant where available. Missing evidence is labeled **platform unverified**. The result is a candidate for review. A matching platform and patch number establish neither application compatibility nor security. A scan with no candidate reports only what was found among the tags examined.
 
-`versions` reports registry failures and incomplete enumeration in its output. Invalid options and Docker inventory failures return a nonzero exit code.
+`versions` reports registry failures and incomplete enumeration in its output. Without state tracking, invalid options and Docker inventory failures return a nonzero exit code.
+
+### Keep finding history
+
+On Linux, create a private state directory and use the same database path on subsequent runs.
+
+```sh
+install -d -m 700 "$HOME/.local/state/happydocker"
+state="$HOME/.local/state/happydocker/findings.db"
+happydocker check --state "$state"
+happydocker versions --repo docker.io/library/nats --state "$state"
+```
+
+HappyDocker creates the database on first use. It creates new database files with mode `0600` on Linux and rejects existing files accessible to group or other users. Keep the parent directory private as well, since SQLite may create a rollback journal there during writes. HappyDocker uses transactions and leaves SQLite's default rollback journaling in place for new databases. The state database contains container and repository names, so keep it out of source control.
+
+By default, history is keyed to the daemon ID returned by `docker info`. If that ID is unavailable or you need history to survive daemon replacement, add a unique, stable `--host clanker` to each state-enabled invocation for that host. Explicit host labels allow ASCII letters, digits, periods, hyphens, and underscores. Switching between a label and the daemon ID starts a separate history.
+
+Schema version 1 keeps one row per host, logical container name, normalized repository, and finding type. Rows store the latest finding's container and image IDs, configured tag, deployed digest when available, available manifest digest or patch tag, platform verification, state, and first and last observation times in UTC. Ordinary container recreation preserves the logical key. Registry credentials and responses are excluded. The database retains resolved rows and does not keep a per-run event log or prune old rows.
+
+The state summary counts new, known, changed, resolved, and incomplete observations. A different candidate tag or relevant image digest can change a finding. A finding that returns after resolution counts as new. Verification confidence is tracked separately, and complete tag enumeration can record an unverified candidate. If authentication, rate limiting, or a registry outage prevents rechecking the same candidate for the same deployment, the current report marks it unverified and history retains the earlier verification. Successful verification can strengthen a known finding.
+
+Expected skips, including local builds, digest pins, unsupported registries, and unrecognized version tags in `versions`, are outside the incomplete count. Truncated enumeration leaves prior state intact, even when the report shows a candidate from the pages examined. Only a conclusive check for the same logical container, repository, and finding type can resolve a finding. Successful observations are saved when an independent check fails.
+
+With `--state`, exit code `0` means the relevant checks completed, `2` means some findings could be evaluated alongside incomplete checks, and `1` means the run could not evaluate any checks or save state. A Docker inventory failure retains Docker's exit code. Finding an update or verified patch candidate does not itself cause an error. Omitting `--state` keeps the existing report and exit behavior.
 
 ### Run locally
 
@@ -127,7 +151,7 @@ Missing optional properties on older Docker versions are accepted through map-ba
 - The deployed manifest must still be readable in the registry. Missing/removed manifests, unsupported schemas or digest algorithms, malformed metadata, and config/platform inconsistencies produce `Unknown`.
 - Docker Hub uses anonymous access. GHCR optionally uses the credential exchange described above, with one configured account per command. HappyDocker uses explicit configuration and does not read Docker login credentials or credential helpers. Tokens, authorization headers, response bodies, signed URLs, and raw network exception details are omitted from reports.
 - Initial requests target only `registry-1.docker.io` or `ghcr.io`; token requests target only `auth.docker.io/token` or `ghcr.io/token`. HTTPS redirects within the same host are bounded to three hops. Configuration blobs may additionally redirect to Docker's documented `production.cloudfront.docker.com` or GitHub's `pkg-containers.githubusercontent.com`; bearer tokens are removed on that hop. All other cross-host redirects, non-HTTPS URLs, credentials in URLs, and nonstandard ports are rejected. Other vendor CDN endpoints may therefore report `Registry unavailable`.
-- Each metadata request, including its authentication and redirect exchange, has a 15-second deadline and bounded response size. HTTP 429 is reported without an immediate retry; `Retry-After` (or a default one-minute cooldown) suppresses further requests to that registry for the remainder of the cooldown within this command. There are no background retries or persistent state.
+- Each metadata request, including its authentication and redirect exchange, has a 15-second deadline and bounded response size. HTTP 429 is reported without an immediate retry; `Retry-After` (or a default one-minute cooldown) suppresses further requests to that registry for the remainder of the cooldown within this command.
 
 Protocol references: [Registry HTTP API](https://distribution.github.io/distribution/spec/api/), [bearer-token authentication](https://distribution.github.io/distribution/spec/auth/token/), [OCI image indexes](https://github.com/opencontainers/image-spec/blob/main/image-index.md), [Docker service endpoints](https://docs.docker.com/desktop/enterprise/allow-list/), and [GitHub package endpoints](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#communication-requirements-for-github-hosted-runners).
 
@@ -143,7 +167,7 @@ See [the project plan](docs/PLAN.md) for scope, milestones, design constraints, 
 
 - **Runtime:** C# / .NET 10
 - **Interface:** Local read-only console report; JSON output planned
-- **State:** SQLite when change tracking is introduced
+- **State:** Opt-in local SQLite finding history for `check` and `versions`
 - **Notifications:** ntfy
 - **Security scanning:** Existing scanner (Trivy or equivalent), with exact digest/version reported
 - **Registries:** Docker Hub and GitHub Container Registry (GHCR) first

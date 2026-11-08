@@ -68,7 +68,13 @@ Remaining milestone work:
 
 ## Milestone 4 — state and notifications (WSIWOT #277–278)
 
-- Use SQLite to remember host/container/image identifiers, scan times, relevant digests, advisory findings, and notification history.
+**Finding history implemented:** `check` and `versions` can take `--state <database-path>` and optional `--host <id>`. Without a label, the Docker daemon ID scopes findings across hosts. One versioned SQLite table tracks mutable-tag changes and patch candidates by host, container name, repository, and finding type. The CLI writes observations in a transaction using UTC timestamps and retains resolved rows. Linux database files are private, and the CLI uses SQLite's default rollback journal. See the [README state directory and usage examples](../README.md#keep-finding-history).
+
+Structured observations distinguish a conclusive absence, incomplete evidence, and expected skips. Only conclusive absence resolves a finding. Expected skips stay outside the incomplete count, and independently successful observations can be recorded in a partial run. Platform verification can improve for a known patch candidate, and a temporary registry failure leaves earlier verification in history while the current report identifies the candidate as unverified. Container removal, renaming, or a repository switch does not automatically resolve a previous finding. History tracks the latest finding per key without an event log or retention policy.
+
+Remaining milestone work:
+
+- Define how to store advisory findings, notification delivery history, and retention policies.
 - Notify once for a meaningful new state; notify again when a newer update or a materially changed security finding appears.
 - Separate alerts for `image update`, `newer version candidate`, and `security finding`.
 - Include host, container, image, current/available version or digest, affected package/advisory, fix availability, and confidence/uncertainty.

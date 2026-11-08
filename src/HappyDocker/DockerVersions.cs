@@ -6,6 +6,10 @@ public static class DockerVersions
 
     public static async Task<int> RunAsync(string[] options, Func<string[], Task<DockerCommandResult>> runDocker,
         RegistryClient registry, TextWriter output, TextWriter error, CancellationToken cancellationToken = default)
+        => (await RunObservedAsync(options, runDocker, registry, output, error, cancellationToken)).InventoryExitCode;
+
+    public static async Task<FindingRun> RunObservedAsync(string[] options, Func<string[], Task<DockerCommandResult>> runDocker,
+        RegistryClient registry, TextWriter output, TextWriter error, CancellationToken cancellationToken = default)
     {
         var selected = new Dictionary<string, ImageReference>(StringComparer.Ordinal);
         for (int index = 0; index < options.Length; index += 2)
@@ -20,14 +24,16 @@ public static class DockerVersions
         }
         if (selected.Count == 0) return InvalidOptions(error);
 
+        DateTimeOffset observedAt = DateTimeOffset.UtcNow;
         DockerInventory inventory = await DockerScan.ReadAsync(runDocker, error);
-        if (inventory.Containers.Count == 0 && inventory.ExitCode != 0) return inventory.ExitCode;
+        if (inventory.Containers.Count == 0 && inventory.ExitCode != 0) return new(inventory.ExitCode, []);
         Dictionary<string, DockerImageRow> images = DockerScan.IndexImages(inventory.Images, error);
         var checker = new RegistryUpdateChecker(registry);
         var enumerations = new Dictionary<string, TagEnumeration>(StringComparer.Ordinal);
         var platformResults = new Dictionary<(string Repository, string Tag, string? Os, string? Arch, string? Variant),
-            (bool Verified, string Detail)>();
+            (bool Verified, string Detail, bool RequestFailed)>();
         var matched = new HashSet<string>(StringComparer.Ordinal);
+        var observations = new List<FindingObservation>();
 
         foreach (DockerInspectRow container in inventory.Containers)
         {
@@ -36,6 +42,11 @@ public static class DockerVersions
             string repository = RepositoryName(reference);
             if (reference.Repository is null || !selected.ContainsKey(repository)) continue;
             matched.Add(repository);
+            var version = PatchVersion.Parse(reference.Tag);
+            FindingEvidence evidence = reference.Registry != "docker.io" || reference.IsDigestPinned || version is null
+                ? FindingEvidence.NotApplicable : FindingEvidence.Incomplete;
+            int observationIndex = observations.Count;
+            observations.Add(FindingObservation.ForContainer(container, reference, FindingKind.PatchCandidate, observedAt, evidence));
             output.WriteLine($"{container.Name.TrimStart('/')}  {repository}  Configured tag {reference.Tag ?? "<none>"}");
 
             if (reference.Registry != "docker.io")
@@ -57,12 +68,14 @@ public static class DockerVersions
             ImageProvenance provenance = DockerImageIdentity.Provenance(reference, image);
             if (provenance.Kind != ImageProvenanceKind.Pulled)
             {
+                if (provenance.Kind == ImageProvenanceKind.BuildOnly)
+                    observations[observationIndex] = observations[observationIndex] with { Evidence = FindingEvidence.NotApplicable };
                 output.WriteLine(provenance.Kind == ImageProvenanceKind.BuildOnly
                     ? "  Skipped locally built image."
                     : $"  Skipped ambiguous provenance. {provenance.Reason}");
                 continue;
             }
-            if (PatchVersion.Parse(reference.Tag) is not { } version)
+            if (version is null)
             {
                 output.WriteLine("  Skipped unrecognized version tag. Expected a stable major.minor.patch tag with an optional variant.");
                 continue;
@@ -79,12 +92,6 @@ public static class DockerVersions
                 if (enumeration.RetryAfter is { } retry) output.WriteLine($"  Retry after {retry:O}.");
             }
             string? tag = version.HighestCandidate(enumeration.Tags);
-            if (tag is null)
-            {
-                output.WriteLine("  No matching newer patch tag found in the tags examined.");
-                continue;
-            }
-
             var (deployment, platformError) = RegistryUpdateChecker.ReadDeployment(container, image);
             if (deployment?.Descriptor?.Kind == ImageDigestKind.ImageIndex
                 && !DockerImageIdentity.Present(deployment.ContainerDescriptor?.Platform))
@@ -98,7 +105,16 @@ public static class DockerVersions
                 deployment = null;
                 platformError = "Container and image manifest descriptors disagree.";
             }
+            if (tag is null)
+            {
+                output.WriteLine("  No matching newer patch tag found in the tags examined.");
+                if (enumeration.IncompleteReason is null && deployment is not null)
+                    observations[observationIndex] = FindingObservation.ForContainer(container, reference,
+                        FindingKind.PatchCandidate, observedAt, FindingEvidence.Absent);
+                continue;
+            }
             bool verified = false;
+            bool requestFailed = false;
             string detail = platformError ?? "";
             if (deployment is not null)
             {
@@ -109,11 +125,15 @@ public static class DockerVersions
                     verification = await checker.VerifyCandidatePlatformAsync(reference, tag, platform, cancellationToken);
                     platformResults.Add(key, verification);
                 }
-                (verified, detail) = verification;
+                (verified, detail, requestFailed) = verification;
             }
 
             output.WriteLine($"  Candidate {tag} ({(verified ? "platform verified" : "platform unverified")}). {detail}");
             output.WriteLine("  A patch candidate does not establish compatibility or security.");
+            if (enumeration.IncompleteReason is null)
+                observations[observationIndex] = FindingObservation.ForContainer(container, reference, FindingKind.PatchCandidate,
+                    observedAt, FindingEvidence.Present, tag, verified, deployment?.ContainerDescriptor?.Digest ?? deployment?.Descriptor?.Digest)
+                    with { PlatformRequestFailed = requestFailed };
         }
 
         foreach (var (repository, reference) in selected)
@@ -121,15 +141,15 @@ public static class DockerVersions
                 output.WriteLine(reference.Registry == "docker.io"
                     ? $"{repository} has no matching running containers."
                     : $"{repository} uses an unsupported registry. Version discovery supports Docker Hub.");
-        return inventory.ExitCode;
+        return new(inventory.ExitCode, observations);
     }
 
     private static string RepositoryName(ImageReference reference) => $"{reference.Registry}/{reference.Repository}";
 
-    private static int InvalidOptions(TextWriter error)
+    private static FindingRun InvalidOptions(TextWriter error)
     {
         error.WriteLine(Usage);
         error.WriteLine("Supply repository names without tags or digests, for example docker.io/library/nats.");
-        return 1;
+        return new(1, []);
     }
 }

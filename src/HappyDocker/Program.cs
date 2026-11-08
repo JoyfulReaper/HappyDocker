@@ -3,10 +3,16 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 
-if (args.Length == 0 || (args[0] != "versions" && (args.Length != 1 || args[0] is not ("scan" or "check"))))
+if (args.Length == 0 || args[0] is not ("scan" or "check" or "versions") || (args[0] == "scan" && args.Length != 1))
 {
-    Console.Error.WriteLine("Usage: happydocker scan|check");
-    Console.Error.WriteLine("       happydocker versions --repo <repository> [--repo <repository> ...]");
+    WriteUsage();
+    return 1;
+}
+
+if (!FindingStateOptions.TryParse(args[1..], out FindingStateOptions options)
+    || (args[0] == "check" && options.CommandArguments.Length != 0))
+{
+    WriteUsage();
     return 1;
 }
 
@@ -17,14 +23,26 @@ try
     if (args[0] == "versions")
     {
         using var anonymousRegistry = new RegistryClient();
-        return await DockerVersions.RunAsync(args[1..], RunDockerAsync, anonymousRegistry, Console.Out, Console.Error);
+        if (options.DatabasePath is null)
+            return await DockerVersions.RunAsync(options.CommandArguments, RunDockerAsync, anonymousRegistry, Console.Out, Console.Error);
+        FindingRun versions = await DockerVersions.RunObservedAsync(options.CommandArguments, RunDockerAsync, anonymousRegistry, Console.Out, Console.Error);
+        return await options.RecordAsync(versions, RunDockerAsync, Console.Out);
     }
     GhcrCredentials? credentials = GhcrCredentials.Load(
         Environment.GetEnvironmentVariable(GhcrCredentials.UsernameVariable),
         Environment.GetEnvironmentVariable(GhcrCredentials.TokenFileVariable),
         Environment.GetEnvironmentVariable(GhcrCredentials.TokenVariable));
     using var registry = new RegistryClient(ghcrCredentials: credentials);
-    return await DockerCheck.RunAsync(arguments => RunDockerAsync(arguments), new RegistryUpdateChecker(registry), Console.Out, Console.Error);
+    var checker = new RegistryUpdateChecker(registry);
+    if (options.DatabasePath is null)
+        return await DockerCheck.RunAsync(RunDockerAsync, checker, Console.Out, Console.Error);
+    FindingRun check = await DockerCheck.RunObservedAsync(RunDockerAsync, checker, Console.Out, Console.Error);
+    return await options.RecordAsync(check, RunDockerAsync, Console.Out);
+}
+catch (FindingHistoryException exception)
+{
+    Console.Error.WriteLine(exception.Message);
+    return 1;
 }
 catch (GhcrConfigurationException exception)
 {
@@ -40,6 +58,13 @@ catch (Win32Exception exception)
 {
     Console.Error.WriteLine($"Unable to run Docker: {exception.Message}");
     return 1;
+}
+
+static void WriteUsage()
+{
+    Console.Error.WriteLine("Usage: happydocker scan");
+    Console.Error.WriteLine("       happydocker check [--state <database-path> [--host <id>]]");
+    Console.Error.WriteLine("       happydocker versions --repo <repository> [--repo <repository> ...] [--state <database-path> [--host <id>]]");
 }
 
 static async Task<DockerCommandResult> RunDockerAsync(params string[] arguments)

@@ -12,7 +12,10 @@ public enum UpdateStatus
 }
 
 public sealed record UpdateResult(UpdateStatus Status, string Reason,
-    string? DeployedManifest = null, string? CurrentManifest = null, DateTimeOffset? RetryAfter = null);
+    string? DeployedManifest = null, string? CurrentManifest = null, DateTimeOffset? RetryAfter = null)
+{
+    internal bool SkippedForInsufficientEvidence { get; init; }
+}
 
 internal sealed class RegistryException(UpdateStatus status, string message, DateTimeOffset? retryAfter = null)
     : Exception(message)
