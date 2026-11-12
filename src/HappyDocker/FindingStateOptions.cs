@@ -66,7 +66,8 @@ public sealed record FindingStateOptions(string[] CommandArguments, string? Data
 
         await output.WriteLineAsync($"Finding history {run.Status.ToString().ToLowerInvariant()}. "
             + $"New {Count(FindingState.New)}, known {Count(FindingState.Known)}, changed {Count(FindingState.Changed)}, "
-            + $"resolved {Count(FindingState.Resolved)}, incomplete {run.IncompleteCount}.");
+            + $"resolved {Count(FindingState.Resolved)}, incomplete {run.IncompleteCount}"
+            + (run.DeferredCount == 0 ? "." : $", deferred {run.DeferredCount}."));
         bool notificationsPending = false;
         if (NotifyNtfy is not null)
         {
@@ -95,6 +96,7 @@ public sealed record FindingStateOptions(string[] CommandArguments, string? Data
         {
             FindingRunStatus.Complete => 0,
             FindingRunStatus.Partial => 2,
+            FindingRunStatus.Deferred => 4,
             _ => 1
         };
 

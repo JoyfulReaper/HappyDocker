@@ -2,7 +2,7 @@
 
 **Read-only Docker image update and vulnerability monitoring.**
 
-HappyDocker is a .NET 10 tool with a working read-only Docker inventory CLI and mutable-tag update checks for Docker Hub and GHCR. Vulnerability monitoring is planned. It **does not** automatically update or restart production containers.
+HappyDocker is a .NET 10 tool with a read-only Docker inventory CLI, mutable-tag update checks for Docker Hub and GHCR, and automatic patch-version discovery for Docker Hub. Vulnerability monitoring is planned. It **does not** automatically update or restart production containers.
 
 ## Goals
 
@@ -24,15 +24,33 @@ Implemented:
 - Unqualified names normalize using Docker naming rules: a name such as `team/app:dev` could be a local tag. Repository digests alone never promote a name to registry-backed; containerd can synthesize them for local builds. Missing digests do not prove a build, and missing, malformed, nonmatching, or mixed pull/build identity records do not prove a pull. Content IDs identify no configured registry repository.
 - Missing image metadata is reported as unknown. Conflicting duplicate image inspection records are rejected with a diagnostic. Partial image-inspection failures still produce an inventory from available metadata and retain Docker's nonzero exit code.
 - Unit tests cover parsing, normalization, classification, metadata handling, and scan commands/output using fixtures, without a Docker daemon.
-- `check` determines whether the configured tag resolves to a different image for the deployed platform. Docker Hub and GHCR use anonymous access by default. Private GHCR packages can use explicitly configured credentials.
-- `versions` discovers newer patch-tag candidates for running containers in explicitly selected Docker Hub repositories.
+- `check` reads one Docker inventory, determines whether configured tags have changed for the deployed platform, and automatically discovers newer patch candidates for eligible Docker Hub images. Docker Hub and GHCR use anonymous access by default. Private GHCR packages can use explicitly configured credentials for mutable-tag checks.
+- `versions --repo` provides optional patch-discovery diagnostics for explicitly selected Docker Hub repositories.
 - `check` and `versions` can record finding history in an opt-in local SQLite database.
 - State-enabled commands can send explicitly configured ntfy alerts through a transactional notification outbox.
 - Registry tests use mocked HTTP responses, including authentication, redirects, rate limits, timeouts, multi-architecture indexes, unchanged NATS version tags, both Docker image stores, synthetic local repository digests, and incomplete or inconsistent metadata. Clanker's pulled NATS and build-only HappyQOTD identity examples are regression fixtures.
 
 Vulnerability scanning, scheduling, and automatic updates remain planned.
 
-### Discover newer patch tags
+### Normal monitoring
+
+Use one command for mutable-tag checks, automatic patch discovery, state tracking, and optional ntfy delivery.
+
+```sh
+install -d -m 700 "$HOME/.local/state/happydocker"
+happydocker check --state "$HOME/.local/state/happydocker/findings.db" --host clanker \
+  --notify-ntfy https://ntfy.example.com/docker-alerts
+```
+
+The command inspects running containers once. It reports mutable-tag changes and patch candidates separately, stores each finding type independently, and groups eligible notifications for containers sharing an image. Automatic discovery uses recognized version tags and matching pull provenance on Docker Hub. Local/imported builds, digest pins, unsupported version formats, and unsupported discovery registries are not applicable. Registry failures, incomplete enumeration, and uncertain platform verification remain explicit in the report.
+
+With `--state`, complete Docker Hub tag lists are reused for 24 hours across invocations. Configured mutable tags and selected candidate platforms are checked on every run. Cached absence leaves prior findings intact, and cached positive observations retain the listing timestamp so an older snapshot cannot replace a newer finding from diagnostics. A newly published patch may therefore appear after the next refresh. Failed or incomplete enumeration does not start the 24-hour interval. A registry Retry-After deadline is persisted and honored across runs.
+
+Automatic discovery refreshes at most ten repositories per invocation and has a one-minute budget for enumeration and platform checks. With state tracking, repositories are ordered by least recent discovery attempt, with never-attempted repositories first. The cache's nullable `last_attempt` field is written transactionally before a fresh listing or cached candidate verification begins. It advances monotonically even when the clock repeats or moves backward. Failed attempts rotate behind waiting repositories without becoming successful cached enumerations. Schema v3 initializes this field for existing databases while preserving cache contents and the outbox.
+
+Cached repositories do not consume the fresh-list allowance. Work postponed by the listing or time budget is reported as `Discovery deferred` and counted separately from registry failures. Deferral preserves prior findings and notification eligibility. Only one repository's bounded tag list is held during processing. Successful registry metadata responses are reused within the command up to 64 documents and 8 MiB. Existing per-request size limits and timeouts also apply. Without state tracking, each invocation fetches tag lists in inventory order and has no durable scheduling history.
+
+### Diagnose patch discovery
 
 ```sh
 happydocker versions --repo docker.io/library/nats
@@ -41,7 +59,7 @@ happydocker versions --repo nats --repo docker.io/library/redis
 dotnet run --project src/HappyDocker -- versions --repo docker.io/library/nats
 ```
 
-Each `--repo` opts in a repository without a tag or digest. Unqualified repository names use Docker Hub defaults. HappyDocker lists tags only for selected Docker Hub repositories used by running containers with recognized version tags and matching Docker pull provenance. Local builds, ambiguous provenance, missing image identity, digest pins, and unsupported registries are reported as skips. Older Docker metadata without pull provenance can therefore be insufficient for discovery. Shared repositories and candidate platform checks are reused across containers.
+For this diagnostic command, each `--repo` selects a repository without a tag or digest. Unqualified repository names use Docker Hub defaults. `versions` bypasses the persisted discovery interval and ten-repository automatic allowance, while retaining the one-minute discovery budget and per-repository bounds. Local builds, ambiguous provenance, missing image identity, digest pins, and unsupported registries are reported as skips. Older Docker metadata without pull provenance can therefore be insufficient for discovery. Shared repositories and candidate platform checks are reused across containers.
 
 Candidates must have the same numeric major and minor version, a greater numeric patch, and exactly the same suffix, including case. The suffix is an opaque variant. For example, hypothetical `2.14.9-alpine` would match `2.14.8-alpine`, while `2.15.0-alpine` and `2.14.9` would be excluded. The command rejects moving aliases, commit-like tags, recognizable prerelease markers, and ambiguous numeric formats. The example does not assert that a tag has been published.
 
@@ -59,6 +77,7 @@ On Linux, create a private state directory and use the same database path on sub
 install -d -m 700 "$HOME/.local/state/happydocker"
 state="$HOME/.local/state/happydocker/findings.db"
 happydocker check --state "$state"
+# Optional repository-specific diagnostic:
 happydocker versions --repo docker.io/library/nats --state "$state"
 ```
 
@@ -66,13 +85,13 @@ HappyDocker creates the database on first use. It creates new database files wit
 
 By default, history is keyed to the daemon ID returned by `docker info`. If that ID is unavailable or you need history to survive daemon replacement, add a unique, stable `--host clanker` to each state-enabled invocation for that host. Explicit host labels allow ASCII letters, digits, periods, hyphens, and underscores. Switching between a label and the daemon ID starts a separate history.
 
-Schema version 2 keeps one finding row per host, logical container name, normalized repository, and finding type, plus a notification outbox. Version 1 databases migrate transactionally, preserving existing finding history. Finding rows store the latest finding's container and image IDs, configured tag, deployed digest when available, available manifest digest or patch tag, platform verification, state, and first and last observation times in UTC. Ordinary container recreation preserves the logical key. Registry credentials and responses are excluded. The database retains resolved findings and does not keep a per-run event log or prune old finding rows.
+Schema version 3 keeps one finding row per host, logical container name, normalized repository, and finding type, plus the notification outbox and Docker Hub discovery cache. Version 1 and 2 databases migrate transactionally, preserving findings, deferred notification eligibility, and pending deliveries. Finding rows store the latest finding's container and image IDs, configured tag, deployed digest when available, available manifest digest or patch tag, platform verification, state, and first and last observation times in UTC. Ordinary container recreation preserves the logical key. Registry credentials and raw responses are excluded. The discovery cache stores validated complete tag lists, their observation times, and server retry deadlines. The database retains resolved findings and does not keep a per-run event log or prune old finding rows.
 
 The state summary counts new, known, changed, resolved, and incomplete observations. A different candidate tag or relevant image digest can change a finding. A finding that returns after resolution counts as new. Verification confidence is tracked separately, and complete tag enumeration can record an unverified candidate. If authentication, rate limiting, or a registry outage prevents rechecking the same candidate for the same deployment, the current report marks it unverified and history retains the earlier verification. Successful verification can strengthen a known finding.
 
-Expected skips, including local builds, digest pins, unsupported registries, and unrecognized version tags in `versions`, are outside the incomplete count. Truncated enumeration leaves prior state intact, even when the report shows a candidate from the pages examined. Only a conclusive check for the same logical container, repository, and finding type can resolve a finding. Successful observations are saved when an independent check fails.
+Expected skips, including local builds, digest pins, unsupported registries, and unrecognized version tags, are outside the incomplete count. Truncated enumeration leaves prior state intact, even when the report shows a candidate from the pages examined. Only a conclusive check for the same logical container, repository, and finding type can resolve a finding. Successful observations are saved when an independent check fails.
 
-With `--state`, exit code `0` means the relevant checks completed, `2` means some findings could be evaluated alongside incomplete checks, and `1` means the run could not evaluate any checks or save state. A Docker inventory failure retains Docker's exit code. Finding an update or verified patch candidate does not itself cause an error. Omitting `--state` keeps the existing report and exit behavior.
+With `--state`, exit code `0` means the relevant checks completed, `2` means some findings could be evaluated alongside incomplete checks, and `1` means the run could not evaluate any checks or save state. Exit code `4` means budget-deferred work remains alongside otherwise completed checks. Actual registry failures retain the `1`/`2` outcomes even when other work is deferred. A Docker inventory failure retains Docker's exit code. Finding an update or verified patch candidate does not itself cause an error. Omitting `--state` keeps the existing report and exit behavior.
 
 ### Send ntfy alerts
 
@@ -82,8 +101,6 @@ Add a topic URL to a state-enabled command to publish new or changed mutable-tag
 state="$HOME/.local/state/happydocker/findings.db"
 happydocker check --state "$state" --host clanker \
   --notify-ntfy https://ntfy.example.com/docker-alerts
-happydocker versions --repo docker.io/library/nats --state "$state" --host clanker \
-  --notify-ntfy https://ntfy.example.com/docker-alerts
 ```
 
 For an authenticated topic, put its bearer token in a private file and set `HAPPYDOCKER_NTFY_TOKEN_FILE` to that file's path. Use mode `0600` for the file and a private parent directory. A trailing newline is accepted. Authenticated requests require HTTPS. An explicitly selected HTTP topic can be used anonymously on an internal network. URLs accept a topic path without embedded credentials, query parameters, or fragments. HappyDocker uses ntfy's documented text POST and bearer authentication. [ntfy publishing documentation](https://docs.ntfy.sh/publish/)
@@ -92,7 +109,7 @@ Alerts include the host, container names, repository, configured tag, available 
 
 Finding transitions and pending alerts are committed together before delivery. An ntfy outage leaves successful observations saved. The outbox stores bounded message snapshots, a hash of the destination URL, attempt counts, retry deadlines, and delivery leases. Tokens, authentication headers, raw responses, and the destination URL are excluded. Successful HTTP responses remove the pending entry. Failed entries remain available on subsequent invocations using the same database, host identifier, and topic URL. Changing the host label or topic selects a separate queue. A queued alert describes the observation when it was created, so a delayed message may describe an earlier deployment.
 
-Deferred eligibility is stored on each finding in nullable `pending_notification_destination` and `pending_notification_state` columns. These hold the destination hash and original New/Changed event while verification is pending. They are cleared atomically when an alert is queued, the candidate or deployment changes, or the finding resolves. Temporary verification failures retain eligibility. Schema version 2 initializes these columns without backfilling alerts when opening version 1 or earlier development version 2 databases.
+Deferred eligibility is stored on each finding in nullable `pending_notification_destination` and `pending_notification_state` columns. These hold the destination hash and original New/Changed event while verification is pending. They are cleared atomically when an alert is queued, the candidate or deployment changes, or the finding resolves. Temporary verification failures retain eligibility. Migration initializes missing eligibility columns without backfilling alerts and preserves existing markers.
 
 Each enabled invocation attempts at most ten messages within a 30-second delivery budget, with an eight-second timeout per request. Delivery stops after the first failure. Retry delays start at one minute and grow to one hour, and a longer server `Retry-After` is honored. A destination cooldown also applies to newly queued messages. Commands use SQLite transactions and 60-second leases to coordinate delivery, and expired leases can be retried after an interrupted process. HTTP redirects are disabled. Messages are capped at 3,800 UTF-8 bytes, and response bodies are discarded.
 
@@ -171,7 +188,7 @@ Missing optional properties on older Docker versions are accepted through map-ba
 
 ### Comparison rules and limits
 
-- Only the configured tag is checked. An unchanged `nats:2.14.3-alpine` is up to date even if `2.14.8-alpine` exists; no tag listing or newer-version discovery occurs.
+- The mutable-tag result compares the configured tag. An unchanged `nats:2.14.3-alpine` can report up to date for that comparison while automatic discovery reports a newer matching patch as a separate finding.
 - Complete deployed platform metadata and a verifiable deployed content identity are required, using the store-specific rules above. Multiple distinct matching repository digests remain insufficient metadata; unrelated repositories never establish the configured image's identity.
 - Both the deployed repository digest and the current tag are resolved through OCI indexes or Docker manifest lists to a unique exact OS/architecture/variant match. Changes affecting only other architectures do not imply an update. Missing or ambiguous platform matches produce `Unknown`; variant compatibility is not guessed. OS version/feature constraints absent from inventory also produce `Unknown`.
 - Configuration digests, platform manifest digests, and index digests are separate identities. Legacy IDs bind to configuration digests; descriptor-backed IDs bind to the exact descriptor content. Update comparisons always use the resolved platform manifests, never an index digest versus a configuration digest or child manifest.

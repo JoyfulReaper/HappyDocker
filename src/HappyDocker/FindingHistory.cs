@@ -12,7 +12,7 @@ public sealed class FindingHistoryException(string message) : Exception(message)
 
 public static class FindingHistory
 {
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 3;
     private const int ApplicationId = 0x48444648; // HDFH
 
     public static IReadOnlyList<FindingTransition> Record(string databasePath, string host, IEnumerable<FindingObservation> observations,
@@ -155,15 +155,17 @@ public static class FindingHistory
         command.Transaction = transaction;
         command.CommandText = "PRAGMA user_version";
         long version = (long)command.ExecuteScalar()!;
-        if (version is not (0 or 1 or SchemaVersion))
+        if (version is not (0 or 1 or 2 or SchemaVersion))
             throw new FindingHistoryException($"Unsupported finding history schema version {version}. Expected {SchemaVersion}.");
 
         command.CommandText = "PRAGMA application_id";
         long applicationId = (long)command.ExecuteScalar()!;
-        if (applicationId == ApplicationId && version is 1 or SchemaVersion)
+        if (applicationId == ApplicationId && version is 1 or 2 or SchemaVersion)
         {
             if (version == 1) CreateOutbox(command);
             EnsureNotificationEligibility(command);
+            if (version < SchemaVersion) CreateDiscoveryCache(command);
+            EnsureDiscoveryAttempts(command);
             return;
         }
         command.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'";
@@ -192,11 +194,39 @@ public static class FindingHistory
         command.ExecuteNonQuery();
         CreateOutbox(command);
         EnsureNotificationEligibility(command);
+        CreateDiscoveryCache(command);
+    }
+
+    private static void CreateDiscoveryCache(SqliteCommand command)
+    {
+        command.CommandText = $"""
+            CREATE TABLE IF NOT EXISTS version_discovery_cache (
+                repository TEXT PRIMARY KEY,
+                fetched_at TEXT,
+                tags_json TEXT,
+                retry_after TEXT,
+                last_attempt INTEGER
+            ) WITHOUT ROWID;
+            PRAGMA user_version = {SchemaVersion};
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static void EnsureDiscoveryAttempts(SqliteCommand command)
+    {
+        command.CommandText = "PRAGMA table_info(version_discovery_cache)";
+        using (SqliteDataReader reader = command.ExecuteReader())
+        {
+            while (reader.Read())
+                if (reader.GetString(1) == "last_attempt") return;
+        }
+        command.CommandText = "ALTER TABLE version_discovery_cache ADD COLUMN last_attempt INTEGER";
+        command.ExecuteNonQuery();
     }
 
     private static void EnsureNotificationEligibility(SqliteCommand command)
     {
-        // Version 2 is still under development. Existing v1 and earlier v2 files start with no retroactive eligibility.
+        // Initialize v1 and earlier development v2 files without retroactive notification eligibility.
         command.CommandText = "PRAGMA table_info(findings)";
         var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         using (SqliteDataReader reader = command.ExecuteReader())
@@ -231,7 +261,7 @@ public static class FindingHistory
                 lease_until INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX notification_outbox_destination ON notification_outbox (destination_key, host, next_attempt);
-            PRAGMA user_version = {SchemaVersion};
+            PRAGMA user_version = 2;
             """;
         command.ExecuteNonQuery();
     }

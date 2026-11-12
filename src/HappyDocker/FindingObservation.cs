@@ -1,8 +1,8 @@
 namespace HappyDocker;
 
 public enum FindingKind { MutableTag, PatchCandidate }
-public enum FindingEvidence { Present, Absent, Incomplete, NotApplicable }
-public enum FindingRunStatus { Complete, Partial, Failed }
+public enum FindingEvidence { Present, Absent, Incomplete, NotApplicable, Deferred }
+public enum FindingRunStatus { Complete, Partial, Failed, Deferred }
 
 public sealed record FindingObservation(
     FindingKind Kind, string ContainerName, string ContainerId, string? ImageId, string? Repository,
@@ -30,10 +30,19 @@ public sealed record FindingObservation(
 
 public sealed record FindingRun(int InventoryExitCode, IReadOnlyList<FindingObservation> Observations)
 {
+    public int DeferredCount => Observations.Count(observation => observation.Evidence == FindingEvidence.Deferred);
+
     public int IncompleteCount => Observations.Count(observation => observation.IsIncomplete)
         + (InventoryExitCode == 0 ? 0 : 1);
 
-    public FindingRunStatus Status => InventoryExitCode == 0 && IncompleteCount == 0 ? FindingRunStatus.Complete
-        : Observations.Any(observation => observation.Evidence is FindingEvidence.Present or FindingEvidence.Absent) ? FindingRunStatus.Partial
-        : FindingRunStatus.Failed;
+    public FindingRunStatus Status
+    {
+        get
+        {
+            if (InventoryExitCode == 0 && IncompleteCount == 0)
+                return DeferredCount == 0 ? FindingRunStatus.Complete : FindingRunStatus.Deferred;
+            return Observations.Any(observation => observation.Evidence is FindingEvidence.Present or FindingEvidence.Absent)
+                ? FindingRunStatus.Partial : FindingRunStatus.Failed;
+        }
+    }
 }

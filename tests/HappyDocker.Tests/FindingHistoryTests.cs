@@ -30,7 +30,7 @@ public sealed class FindingHistoryTests
         var recreated = first with { ContainerId = "recreated", ObservedAt = first.ObservedAt.AddMinutes(1) };
         Assert.AreEqual(FindingState.Known, Record(recreated).State);
         Assert.AreEqual(FindingState.Known, Record(recreated).State);
-        Assert.AreEqual(2L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(3L, Scalar("PRAGMA user_version"));
         Assert.AreEqual("delete", Scalar("PRAGMA journal_mode"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM findings"));
         Assert.AreEqual("recreated", Scalar("SELECT container_id FROM findings"));

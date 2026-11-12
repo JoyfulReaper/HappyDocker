@@ -5,7 +5,8 @@ using System.Text.RegularExpressions;
 namespace HappyDocker;
 
 internal sealed record TagEnumeration(IReadOnlyCollection<string> Tags, string? IncompleteReason = null,
-    DateTimeOffset? RetryAfter = null);
+    DateTimeOffset? RetryAfter = null, DateTimeOffset? CachedAt = null, DateTimeOffset? ObservedAt = null,
+    string? DeferredReason = null);
 
 internal static class RegistryTagDiscovery
 {

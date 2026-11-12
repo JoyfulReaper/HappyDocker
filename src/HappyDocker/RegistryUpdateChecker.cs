@@ -3,8 +3,28 @@ using System.Text.Json;
 namespace HappyDocker;
 
 /// <summary>Compares resolved platform manifests, never image IDs against repository digests.</summary>
-public sealed class RegistryUpdateChecker(RegistryClient registry)
+public sealed class RegistryUpdateChecker(RegistryClient registry, bool reuseResponses = false)
 {
+    private readonly Dictionary<(string Registry, string Repository, string Reference, bool Config), RegistryDocument> documents = [];
+    private int cachedBytes;
+    private int cachedDocuments;
+
+    private async Task<RegistryDocument> GetDocumentAsync(string registryName, string repository, string reference,
+        bool config, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var key = (registryName, repository, reference, config);
+        if (reuseResponses && documents.TryGetValue(key, out var cached)) return cached;
+        RegistryDocument document = await registry.GetAsync(registryName, repository, reference, config, cancellationToken);
+        if (reuseResponses && cachedDocuments < 64 && cachedBytes + document.Bytes.Length <= 8 * 1024 * 1024)
+        {
+            documents[key] = document;
+            documents.TryAdd((registryName, repository, document.Digest, config), document);
+            cachedBytes += document.Bytes.Length;
+            cachedDocuments++;
+        }
+        return document;
+    }
     private sealed record PlatformManifest(string Digest, string ConfigDigest, long ConfigSize, int LayerCount, bool HasPlatformDescriptor);
     internal sealed record LocalDeployment(DockerImageRow Image, ImageDescriptor? Descriptor, ImageDescriptor? ContainerDescriptor);
 
@@ -153,7 +173,7 @@ public sealed class RegistryUpdateChecker(RegistryClient registry)
     private async Task VerifyConfigAsync(ImageReference reference, PlatformManifest manifest, DockerImageRow image,
         CancellationToken cancellationToken)
     {
-        RegistryDocument config = await registry.GetAsync(reference.Registry!, reference.Repository!, manifest.ConfigDigest, true, cancellationToken);
+        RegistryDocument config = await GetDocumentAsync(reference.Registry!, reference.Repository!, manifest.ConfigDigest, true, cancellationToken);
         if (config.Bytes.LongLength != manifest.ConfigSize)
             throw Unknown("Image configuration size disagrees with its manifest descriptor.");
         using JsonDocument document = JsonValue.Parse(config.Bytes);
@@ -174,7 +194,7 @@ public sealed class RegistryUpdateChecker(RegistryClient registry)
         if (depth > 4) throw Unknown("Nested image index exceeds the supported depth.");
         if (!cache.TryGetValue(selector, out RegistryDocument? content))
         {
-            content = await registry.GetAsync(reference.Registry!, reference.Repository!, selector, false, cancellationToken);
+            content = await GetDocumentAsync(reference.Registry!, reference.Repository!, selector, false, cancellationToken);
             cache.Add(selector, content);
             // Both keys name the same verified bytes, independent of the original digest algorithm.
             cache.TryAdd(content.Digest, content);

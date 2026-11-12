@@ -33,10 +33,10 @@ try
         Environment.GetEnvironmentVariable(GhcrCredentials.TokenFileVariable),
         Environment.GetEnvironmentVariable(GhcrCredentials.TokenVariable));
     using var registry = new RegistryClient(ghcrCredentials: credentials);
-    var checker = new RegistryUpdateChecker(registry);
     if (options.DatabasePath is null)
-        return await DockerCheck.RunAsync(RunDockerAsync, checker, Console.Out, Console.Error);
-    FindingRun check = await DockerCheck.RunObservedAsync(RunDockerAsync, checker, Console.Out, Console.Error);
+        return await DockerCheck.RunAsync(RunDockerAsync, registry, Console.Out, Console.Error);
+    FindingRun check = await DockerCheck.RunObservedAsync(RunDockerAsync, registry, Console.Out, Console.Error,
+        discoveryCache: new VersionDiscoveryCache(options.DatabasePath));
     return await options.RecordAsync(check, RunDockerAsync, Console.Out);
 }
 catch (FindingHistoryException exception)

@@ -3,6 +3,26 @@ namespace HappyDocker;
 public static class DockerCheck
 {
     public static async Task<int> RunAsync(Func<string[], Task<DockerCommandResult>> runDocker,
+        RegistryClient registry, TextWriter output, TextWriter error, CancellationToken cancellationToken = default)
+        => (await RunObservedAsync(runDocker, registry, output, error, cancellationToken)).InventoryExitCode;
+
+    public static async Task<FindingRun> RunObservedAsync(Func<string[], Task<DockerCommandResult>> runDocker,
+        RegistryClient registry, TextWriter output, TextWriter error, CancellationToken cancellationToken = default,
+        VersionDiscoveryCache? discoveryCache = null, TimeSpan? discoveryBudget = null)
+    {
+        DateTimeOffset observedAt = DateTimeOffset.UtcNow;
+        DockerInventory inventory = await DockerScan.ReadAsync(runDocker, error);
+        var checker = new RegistryUpdateChecker(registry, reuseResponses: true);
+        FindingRun mutable = await ObserveInventoryAsync(inventory, checker, observedAt, output, error, cancellationToken);
+        if (inventory.Containers.Count == 0) return mutable;
+        output.WriteLine();
+        output.WriteLine("Patch version discovery");
+        FindingRun patches = await DockerVersions.ObserveInventoryAsync(inventory, registry, checker, null, observedAt,
+            output, error, cancellationToken, discoveryCache, discoveryBudget);
+        return new(inventory.ExitCode, [.. mutable.Observations, .. patches.Observations]);
+    }
+
+    public static async Task<int> RunAsync(Func<string[], Task<DockerCommandResult>> runDocker,
         RegistryUpdateChecker checker, TextWriter output, TextWriter error, CancellationToken cancellationToken = default)
         => (await RunObservedAsync(runDocker, checker, output, error, cancellationToken)).InventoryExitCode;
 
@@ -11,6 +31,12 @@ public static class DockerCheck
     {
         DateTimeOffset observedAt = DateTimeOffset.UtcNow;
         DockerInventory inventory = await DockerScan.ReadAsync(runDocker, error);
+        return await ObserveInventoryAsync(inventory, checker, observedAt, output, error, cancellationToken);
+    }
+
+    private static async Task<FindingRun> ObserveInventoryAsync(DockerInventory inventory, RegistryUpdateChecker checker,
+        DateTimeOffset observedAt, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
         if (inventory.Containers.Count == 0)
         {
             if (inventory.ExitCode == 0) output.WriteLine("No running containers found.");
@@ -18,11 +44,19 @@ public static class DockerCheck
         }
         Dictionary<string, DockerImageRow> images = DockerScan.IndexImages(inventory.Images, error);
         var observations = new List<FindingObservation>();
+        var results = new Dictionary<(string? ImageId, string? Reference, string? Platform, string? Descriptor), UpdateResult>();
         output.WriteLine($"{"CONTAINER",-24} {"IMAGE",-58} RESULT");
         foreach (DockerInspectRow container in inventory.Containers)
         {
             images.TryGetValue(container.ImageId ?? "", out DockerImageRow? image);
-            UpdateResult result = await checker.CheckAsync(container, image, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var key = (container.ImageId, container.ConfiguredImage, container.Platform,
+                DockerImageIdentity.Present(container.ImageManifestDescriptor) ? container.ImageManifestDescriptor!.Value.GetRawText() : null);
+            if (!results.TryGetValue(key, out UpdateResult? result))
+            {
+                result = await checker.CheckAsync(container, image, cancellationToken);
+                results.Add(key, result);
+            }
             output.WriteLine($"{container.Name.TrimStart('/'),-24} {container.ConfiguredImage ?? "<unknown>",-58} {Label(result.Status)}");
             output.WriteLine($"  {result.Reason}");
             if (result.DeployedManifest is not null) output.WriteLine($"  Deployed platform manifest: {result.DeployedManifest}");

@@ -275,10 +275,11 @@ public sealed class NotificationTests
             ALTER TABLE findings DROP COLUMN pending_notification_state;
             ALTER TABLE findings DROP COLUMN pending_notification_destination;
             """);
+        Execute("DROP TABLE version_discovery_cache; PRAGMA user_version = 2");
         if (version == 1) Execute("DROP TABLE notification_outbox; PRAGMA user_version = 1");
         var verified = patch with { PlatformVerified = true, ObservedAt = patch.ObservedAt.AddSeconds(1) };
         Assert.AreEqual(FindingState.Known, FindingHistory.Record(Database, Host, [verified], client.DestinationKey).Single().State);
-        Assert.AreEqual(2L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(3L, Scalar("PRAGMA user_version"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM findings"));
         Assert.AreEqual(0L, Scalar("SELECT count(*) FROM notification_outbox"));
         Assert.AreEqual(DBNull.Value, Scalar("SELECT pending_notification_destination FROM findings"));
@@ -484,7 +485,7 @@ public sealed class NotificationTests
         Execute("DROP TABLE notification_outbox; PRAGMA user_version = 1");
         using var client = Client((_, _) => throw new AssertFailedException("Known findings should not be sent."));
         Assert.AreEqual(0, await Options().RecordAsync(new(0, [observation]), NoDocker, TextWriter.Null, client));
-        Assert.AreEqual(2L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(3L, Scalar("PRAGMA user_version"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM findings"));
         Assert.AreEqual(observation.Available, Scalar("SELECT available FROM findings"));
         Assert.AreEqual("Known", Scalar("SELECT state FROM findings"));
@@ -503,7 +504,7 @@ public sealed class NotificationTests
         var runs = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
             FindingHistory.Record(Database, Host, [changed], client.DestinationKey))));
         Assert.HasCount(1, runs.SelectMany(run => run).Where(transition => transition.State == FindingState.Changed));
-        Assert.AreEqual(2L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(3L, Scalar("PRAGMA user_version"));
         Assert.AreEqual(firstObserved, Scalar("SELECT first_observed FROM findings"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM notification_outbox"));
     }
