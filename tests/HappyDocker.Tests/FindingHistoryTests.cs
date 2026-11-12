@@ -24,13 +24,13 @@ public sealed class FindingHistoryTests
     [TestMethod]
     public void DatabaseReopensWithoutDuplicateRowsAndIgnoresRecreatedContainerIds()
     {
-        var first = new FindingObservation(FindingKind.PatchCandidate, "nats", "original", "image", Repo, Current,
+        var first = new FindingObservation(FindingKind.VersionCandidate, "nats", "original", "image", Repo, Current,
             null, Patch, true, FindingEvidence.Present, new DateTimeOffset(2026, 10, 22, 4, 0, 0, TimeSpan.FromHours(-4)));
         Assert.AreEqual(FindingState.New, Record(first).State);
         var recreated = first with { ContainerId = "recreated", ObservedAt = first.ObservedAt.AddMinutes(1) };
         Assert.AreEqual(FindingState.Known, Record(recreated).State);
         Assert.AreEqual(FindingState.Known, Record(recreated).State);
-        Assert.AreEqual(3L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(4L, Scalar("PRAGMA user_version"));
         Assert.AreEqual("delete", Scalar("PRAGMA journal_mode"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM findings"));
         Assert.AreEqual("recreated", Scalar("SELECT container_id FROM findings"));
@@ -240,7 +240,7 @@ public sealed class FindingHistoryTests
                 fixture.Image = fixture.Image with { Identity = BuildOnly() };
                 break;
             case "unsupported registry":
-                repository = "ghcr.io/org/nats";
+                repository = "registry.example/org/nats";
                 fixture.Container = fixture.Container with { ConfiguredImage = repository + ":" + Current };
                 break;
         }
@@ -298,7 +298,7 @@ public sealed class FindingHistoryTests
         var redis = fixture.Container with { Id = "redis", Name = "/redis", ConfiguredImage = "redis:7.2.1",
             ImageId = Digest(fixture.NewConfig) };
         var redisImage = fixture.Image with { Id = redis.ImageId, Identity = Pull("docker.io/library/redis") };
-        var prior = new FindingObservation(FindingKind.PatchCandidate, "redis", "redis", redis.ImageId, "docker.io/library/redis",
+        var prior = new FindingObservation(FindingKind.VersionCandidate, "redis", "redis", redis.ImageId, "docker.io/library/redis",
             "7.2.1", null, "7.2.2", true, FindingEvidence.Present, DateTimeOffset.UtcNow);
         Record(prior);
         fixture.SetTag(fixture.NewManifest, Patch);
@@ -353,7 +353,7 @@ public sealed class FindingHistoryTests
     {
         Assert.IsTrue(FindingStateOptions.TryParse(["--state", Database, "--repo", "nats"], out var options));
         CollectionAssert.AreEqual(new[] { "--repo", "nats" }, options.CommandArguments);
-        var observation = new FindingObservation(FindingKind.PatchCandidate, "nats", "container", "image", Repo,
+        var observation = new FindingObservation(FindingKind.VersionCandidate, "nats", "container", "image", Repo,
             Current, null, Patch, true, FindingEvidence.Present, DateTimeOffset.UtcNow);
         var run = new FindingRun(0, [observation]);
         await Assert.ThrowsExactlyAsync<FindingHistoryException>(() => options.RecordAsync(run,

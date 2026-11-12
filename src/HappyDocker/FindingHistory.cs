@@ -12,7 +12,7 @@ public sealed class FindingHistoryException(string message) : Exception(message)
 
 public static class FindingHistory
 {
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 4;
     private const int ApplicationId = 0x48444648; // HDFH
 
     public static IReadOnlyList<FindingTransition> Record(string databasePath, string host, IEnumerable<FindingObservation> observations,
@@ -56,11 +56,11 @@ public static class FindingHistory
                 FindingState? pendingState = previous?.PendingNotificationState;
                 if (state is FindingState.New or FindingState.Changed)
                 {
-                    pendingDestination = observation.Kind == FindingKind.PatchCandidate && observation.PlatformVerified != true
+                    pendingDestination = observation.Kind == FindingKind.VersionCandidate && !observation.HasVerifiedCandidate
                         ? notificationDestinationKey : null;
                     pendingState = pendingDestination is null ? null : state;
                 }
-                if (notificationDestinationKey is not null && observation.PlatformVerified == true
+                if (notificationDestinationKey is not null && observation.HasVerifiedCandidate
                     && (state is FindingState.New or FindingState.Changed
                         || (pendingDestination == notificationDestinationKey && pendingState is not null)))
                 {
@@ -72,15 +72,16 @@ public static class FindingHistory
                 using SqliteCommand upsert = SlotCommand(connection, transaction, host, observation, """
                     INSERT INTO findings (host, container_name, repository, kind, container_id, image_id, configured_tag,
                                           deployed_digest, available, platform_verified, first_observed, last_observed, state,
-                                          pending_notification_destination, pending_notification_state)
+                                          pending_notification_destination, pending_notification_state, verified_alternative)
                     VALUES ($host, $name, $repo, $kind, $container, $image, $tag, $deployed, $available, $verified,
-                            $observed, $observed, $state, $pending_destination, $pending_state)
+                            $observed, $observed, $state, $pending_destination, $pending_state, $alternative)
                     ON CONFLICT (host, container_name, repository, kind) DO UPDATE SET
                         container_id = excluded.container_id, image_id = excluded.image_id, configured_tag = excluded.configured_tag,
                         deployed_digest = excluded.deployed_digest, available = excluded.available,
                         platform_verified = excluded.platform_verified, last_observed = excluded.last_observed, state = excluded.state,
                         pending_notification_destination = excluded.pending_notification_destination,
-                        pending_notification_state = excluded.pending_notification_state
+                        pending_notification_state = excluded.pending_notification_state,
+                        verified_alternative = excluded.verified_alternative
                     """);
                 upsert.Parameters.AddWithValue("$container", observation.ContainerId);
                 upsert.Parameters.AddWithValue("$image", (object?)observation.ImageId ?? DBNull.Value);
@@ -92,6 +93,10 @@ public static class FindingHistory
                 upsert.Parameters.AddWithValue("$state", state.ToString());
                 upsert.Parameters.AddWithValue("$pending_destination", (object?)pendingDestination ?? DBNull.Value);
                 upsert.Parameters.AddWithValue("$pending_state", (object?)pendingState?.ToString() ?? DBNull.Value);
+                upsert.Parameters.AddWithValue("$alternative", (object?)observation.VerifiedAlternative
+                    ?? (state == FindingState.Known && previous!.VerifiedAlternative is { } oldAlternative
+                        && observation.FailedPlatformRequests.Contains(oldAlternative) ? (object)oldAlternative : null)
+                    ?? DBNull.Value);
                 upsert.ExecuteNonQuery();
                 transitions.Add(new(observation, state));
             }
@@ -155,17 +160,19 @@ public static class FindingHistory
         command.Transaction = transaction;
         command.CommandText = "PRAGMA user_version";
         long version = (long)command.ExecuteScalar()!;
-        if (version is not (0 or 1 or 2 or SchemaVersion))
+        if (version is not (0 or 1 or 2 or 3 or SchemaVersion))
             throw new FindingHistoryException($"Unsupported finding history schema version {version}. Expected {SchemaVersion}.");
 
         command.CommandText = "PRAGMA application_id";
         long applicationId = (long)command.ExecuteScalar()!;
-        if (applicationId == ApplicationId && version is 1 or 2 or SchemaVersion)
+        if (applicationId == ApplicationId && version is 1 or 2 or 3 or SchemaVersion)
         {
+            if (version == SchemaVersion) return;
             if (version == 1) CreateOutbox(command);
             EnsureNotificationEligibility(command);
-            if (version < SchemaVersion) CreateDiscoveryCache(command);
+            if (version < 3) CreateDiscoveryCache(command);
             EnsureDiscoveryAttempts(command);
+            MigrateVersionFindings(command);
             return;
         }
         command.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'";
@@ -195,6 +202,37 @@ public static class FindingHistory
         CreateOutbox(command);
         EnsureNotificationEligibility(command);
         CreateDiscoveryCache(command);
+        MigrateVersionFindings(command);
+    }
+
+    private static void MigrateVersionFindings(SqliteCommand command)
+    {
+        // Rebuild only the findings table. Pending delivery IDs, messages, leases and retry counts stay intact.
+        command.CommandText = $"""
+            CREATE TABLE findings_v4 (
+                host TEXT NOT NULL, container_name TEXT NOT NULL, repository TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('MutableTag', 'VersionCandidate')),
+                container_id TEXT NOT NULL, image_id TEXT, configured_tag TEXT, deployed_digest TEXT,
+                available TEXT NOT NULL, platform_verified INTEGER NOT NULL CHECK (platform_verified IN (0, 1)),
+                first_observed TEXT NOT NULL, last_observed TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('New', 'Known', 'Changed', 'Resolved')),
+                pending_notification_destination TEXT,
+                pending_notification_state TEXT CHECK (pending_notification_state IN ('New', 'Changed')),
+                verified_alternative TEXT,
+                PRIMARY KEY (host, container_name, repository, kind)
+            ) WITHOUT ROWID;
+            INSERT INTO findings_v4
+                SELECT host, container_name, repository,
+                    CASE kind WHEN 'PatchCandidate' THEN 'VersionCandidate' ELSE kind END,
+                    container_id, image_id, configured_tag, deployed_digest, available, platform_verified,
+                    first_observed, last_observed, state, pending_notification_destination, pending_notification_state, NULL
+                FROM findings;
+            DROP TABLE findings;
+            ALTER TABLE findings_v4 RENAME TO findings;
+            UPDATE version_discovery_cache SET repository = 'docker.io/' || repository;
+            PRAGMA user_version = {SchemaVersion};
+            """;
+        command.ExecuteNonQuery();
     }
 
     private static void CreateDiscoveryCache(SqliteCommand command)
@@ -207,7 +245,7 @@ public static class FindingHistory
                 retry_after TEXT,
                 last_attempt INTEGER
             ) WITHOUT ROWID;
-            PRAGMA user_version = {SchemaVersion};
+            PRAGMA user_version = 3;
             """;
         command.ExecuteNonQuery();
     }
@@ -270,14 +308,14 @@ public static class FindingHistory
     {
         using SqliteCommand command = SlotCommand(connection, transaction, host, observation, """
             SELECT image_id, configured_tag, deployed_digest, available, platform_verified, last_observed, state,
-                pending_notification_destination, pending_notification_state
+                pending_notification_destination, pending_notification_state, verified_alternative
             FROM findings WHERE host = $host AND container_name = $name AND repository = $repo AND kind = $kind
             """);
         using SqliteDataReader reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         return new(Value(0), Value(1), Value(2), reader.GetString(3), reader.GetBoolean(4), reader.GetString(5),
             Enum.Parse<FindingState>(reader.GetString(6)), Value(7),
-            reader.IsDBNull(8) ? null : Enum.Parse<FindingState>(reader.GetString(8)));
+            reader.IsDBNull(8) ? null : Enum.Parse<FindingState>(reader.GetString(8)), Value(9));
 
         string? Value(int column) => reader.IsDBNull(column) ? null : reader.GetString(column);
     }
@@ -297,7 +335,7 @@ public static class FindingHistory
 
     private sealed record StoredFinding(string? ImageId, string? ConfiguredTag, string? DeployedDigest, string Available,
         bool PlatformVerified, string LastObserved, FindingState State, string? PendingNotificationDestination,
-        FindingState? PendingNotificationState)
+        FindingState? PendingNotificationState, string? VerifiedAlternative)
     {
         public bool Matches(FindingObservation observation) => ImageId == observation.ImageId && ConfiguredTag == observation.ConfiguredTag
             && DeployedDigest == observation.DeployedDigest && Available == observation.Available;

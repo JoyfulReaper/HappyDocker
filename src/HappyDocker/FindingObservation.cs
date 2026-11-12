@@ -1,6 +1,6 @@
 namespace HappyDocker;
 
-public enum FindingKind { MutableTag, PatchCandidate }
+public enum FindingKind { MutableTag, VersionCandidate }
 public enum FindingEvidence { Present, Absent, Incomplete, NotApplicable, Deferred }
 public enum FindingRunStatus { Complete, Partial, Failed, Deferred }
 
@@ -10,6 +10,14 @@ public sealed record FindingObservation(
     FindingEvidence Evidence, DateTimeOffset ObservedAt)
 {
     internal bool PlatformRequestFailed { get; init; }
+    internal IReadOnlyCollection<string> FailedPlatformRequests { get; init; } = [];
+    public string? VerifiedAlternative { get; init; }
+    public VersionUpgrade? Upgrade => Kind == FindingKind.VersionCandidate ? ImageVersion.Parse(ConfiguredTag)?.UpgradeTo(Available) : null;
+    public VersionUpgrade? AlternativeUpgrade => Kind == FindingKind.VersionCandidate
+        ? ImageVersion.Parse(ConfiguredTag)?.UpgradeTo(VerifiedAlternative) : null;
+    internal bool HasVerifiedCandidate => PlatformVerified == true
+        || (AlternativeUpgrade is not null && ImageVersion.Parse(Available) is { } newest
+            && ImageVersion.Parse(VerifiedAlternative) is { } alternative && newest.CompareTo(alternative) > 0);
 
     internal static FindingObservation ForContainer(DockerInspectRow container, ImageReference reference, FindingKind kind,
         DateTimeOffset observedAt, FindingEvidence evidence, string? available = null,

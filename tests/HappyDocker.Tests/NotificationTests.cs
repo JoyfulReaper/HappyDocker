@@ -62,7 +62,7 @@ public sealed class NotificationTests
     public void PatchCandidatesWaitForVerificationAndIgnoreIncompleteOrSkippedObservations()
     {
         using var client = Client((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
-        var patch = Observation() with { Kind = FindingKind.PatchCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
+        var patch = Observation() with { Kind = FindingKind.VersionCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
         FindingHistory.Record(Database, Host, [
             patch,
             patch with { ContainerName = "incomplete", Evidence = FindingEvidence.Incomplete },
@@ -73,12 +73,12 @@ public sealed class NotificationTests
         Assert.AreEqual(FindingState.Known, FindingHistory.Record(Database, Host,
             [patch with { PlatformVerified = true, ObservedAt = patch.ObservedAt.AddSeconds(1) }], client.DestinationKey).Single().State);
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM notification_outbox"));
-        Assert.Contains("New patch candidate", (string)Scalar("SELECT message FROM notification_outbox")!);
+        Assert.Contains("New patch version candidate", (string)Scalar("SELECT message FROM notification_outbox")!);
         var next = patch with { Available = "2.14.10-alpine", PlatformVerified = true, ObservedAt = patch.ObservedAt.AddSeconds(2) };
         FindingHistory.Record(Database, Host, [next], client.DestinationKey);
         Assert.AreEqual(2L, Scalar("SELECT count(*) FROM notification_outbox"));
         string text = (string)Scalar("SELECT message FROM notification_outbox ORDER BY id DESC LIMIT 1")!;
-        Assert.Contains("Changed patch candidate", text);
+        Assert.Contains("Changed patch version candidate", text);
         Assert.Contains("Review compatibility and security separately.", text);
         Assert.Contains("2.14.10-alpine", text);
         FindingHistory.Record(Database, Host, [next with { ContainerName = "other", Available = "2.14.11-alpine" }], client.DestinationKey);
@@ -93,7 +93,7 @@ public sealed class NotificationTests
         int requests = 0;
         using var client = Client((_, _) => Task.FromResult(new HttpResponseMessage(
             ++requests == 1 ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK)));
-        var patch = Observation() with { Kind = FindingKind.PatchCandidate, Available = "2.14.10-alpine", PlatformVerified = false };
+        var patch = Observation() with { Kind = FindingKind.VersionCandidate, Available = "2.14.10-alpine", PlatformVerified = false };
         if (changed)
             FindingHistory.Record(Database, Host, [patch with { Available = "2.14.9-alpine", ObservedAt = patch.ObservedAt.AddSeconds(-1) }]);
         FindingState origin = changed ? FindingState.Changed : FindingState.New;
@@ -113,7 +113,7 @@ public sealed class NotificationTests
         Assert.AreEqual(DBNull.Value, Scalar("SELECT pending_notification_destination FROM findings"));
         Assert.AreEqual(DBNull.Value, Scalar("SELECT pending_notification_state FROM findings"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM notification_outbox"));
-        Assert.Contains($"{origin} patch candidate", (string)Scalar("SELECT message FROM notification_outbox")!);
+        Assert.Contains($"{origin} patch version candidate", (string)Scalar("SELECT message FROM notification_outbox")!);
         Assert.AreEqual(1, (await NotificationOutbox.DeliverAsync(Database, Host, client)).Failed);
         Assert.AreEqual(FindingState.Known, FindingHistory.Record(Database, Host, [verified], client.DestinationKey).Single().State);
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM notification_outbox"));
@@ -130,7 +130,7 @@ public sealed class NotificationTests
     public void EnablingNotificationsForKnownCandidatesDoesNotCreateDeferredEligibility(bool initiallyVerified)
     {
         using var client = Client((_, _) => throw new AssertFailedException("Existing findings are not eligible."));
-        var patch = Observation() with { Kind = FindingKind.PatchCandidate, Available = "2.14.9-alpine", PlatformVerified = initiallyVerified };
+        var patch = Observation() with { Kind = FindingKind.VersionCandidate, Available = "2.14.9-alpine", PlatformVerified = initiallyVerified };
         FindingHistory.Record(Database, Host, [patch]);
         Assert.AreEqual(FindingState.Known, FindingHistory.Record(Database, Host, [patch]).Single().State);
         Assert.AreEqual(FindingState.Known, FindingHistory.Record(Database, Host, [patch], client.DestinationKey).Single().State);
@@ -146,7 +146,7 @@ public sealed class NotificationTests
     public void CandidateChangesReplaceObsoleteEligibilityEvenWithNotificationsDisabled(bool notifyOnChange)
     {
         using var client = Client((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
-        var original = Observation() with { Kind = FindingKind.PatchCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
+        var original = Observation() with { Kind = FindingKind.VersionCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
         FindingHistory.Record(Database, Host, [original], client.DestinationKey);
         var next = original with { Available = "2.14.10-alpine", ObservedAt = original.ObservedAt.AddSeconds(1) };
         Assert.AreEqual(FindingState.Changed, FindingHistory.Record(Database, Host, [next],
@@ -160,7 +160,7 @@ public sealed class NotificationTests
         if (notifyOnChange)
         {
             string message = (string)Scalar("SELECT message FROM notification_outbox")!;
-            Assert.Contains("Changed patch candidate", message);
+            Assert.Contains("Changed patch version candidate", message);
             Assert.Contains("2.14.10-alpine", message);
             Assert.DoesNotContain("2.14.9-alpine", message);
         }
@@ -172,7 +172,7 @@ public sealed class NotificationTests
         using var client = Client((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
         using var other = Client((_, _) => throw new AssertFailedException("Other destination is not eligible."),
             destination: "https://ntfy.example/other");
-        var patch = Observation() with { Kind = FindingKind.PatchCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
+        var patch = Observation() with { Kind = FindingKind.VersionCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
         FindingHistory.Record(Database, Host, [patch], client.DestinationKey);
         var verified = patch with { PlatformVerified = true, ObservedAt = patch.ObservedAt.AddSeconds(1) };
         FindingHistory.Record(Database, Host, [verified], other.DestinationKey);
@@ -189,7 +189,7 @@ public sealed class NotificationTests
     public void DeferredEligibilityAndFindingVerificationRollBackIfOutboxEnqueueFails()
     {
         using var client = Client((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
-        var patch = Observation() with { Kind = FindingKind.PatchCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
+        var patch = Observation() with { Kind = FindingKind.VersionCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
         FindingHistory.Record(Database, Host, [patch], client.DestinationKey);
         Execute("""
             CREATE TRIGGER fail_notification BEFORE INSERT ON notification_outbox
@@ -211,7 +211,7 @@ public sealed class NotificationTests
     public async Task ConcurrentVerificationConsumesDeferredEligibilityOnce()
     {
         using var client = Client((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
-        var patch = Observation() with { Kind = FindingKind.PatchCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
+        var patch = Observation() with { Kind = FindingKind.VersionCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
         FindingHistory.Record(Database, Host, [patch], client.DestinationKey);
         var verified = patch with { PlatformVerified = true, ObservedAt = patch.ObservedAt.AddSeconds(1) };
         var results = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
@@ -269,7 +269,7 @@ public sealed class NotificationTests
     public void EarlierSchemasGainEligibilityColumnsWithoutRetroactiveAlerts(int version)
     {
         using var client = Client((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
-        var patch = Observation() with { Kind = FindingKind.PatchCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
+        var patch = Observation() with { Kind = FindingKind.VersionCandidate, Available = "2.14.9-alpine", PlatformVerified = false };
         FindingHistory.Record(Database, Host, [patch]);
         Execute("""
             ALTER TABLE findings DROP COLUMN pending_notification_state;
@@ -279,7 +279,7 @@ public sealed class NotificationTests
         if (version == 1) Execute("DROP TABLE notification_outbox; PRAGMA user_version = 1");
         var verified = patch with { PlatformVerified = true, ObservedAt = patch.ObservedAt.AddSeconds(1) };
         Assert.AreEqual(FindingState.Known, FindingHistory.Record(Database, Host, [verified], client.DestinationKey).Single().State);
-        Assert.AreEqual(3L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(4L, Scalar("PRAGMA user_version"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM findings"));
         Assert.AreEqual(0L, Scalar("SELECT count(*) FROM notification_outbox"));
         Assert.AreEqual(DBNull.Value, Scalar("SELECT pending_notification_destination FROM findings"));
@@ -485,7 +485,7 @@ public sealed class NotificationTests
         Execute("DROP TABLE notification_outbox; PRAGMA user_version = 1");
         using var client = Client((_, _) => throw new AssertFailedException("Known findings should not be sent."));
         Assert.AreEqual(0, await Options().RecordAsync(new(0, [observation]), NoDocker, TextWriter.Null, client));
-        Assert.AreEqual(3L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(4L, Scalar("PRAGMA user_version"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM findings"));
         Assert.AreEqual(observation.Available, Scalar("SELECT available FROM findings"));
         Assert.AreEqual("Known", Scalar("SELECT state FROM findings"));
@@ -504,7 +504,7 @@ public sealed class NotificationTests
         var runs = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
             FindingHistory.Record(Database, Host, [changed], client.DestinationKey))));
         Assert.HasCount(1, runs.SelectMany(run => run).Where(transition => transition.State == FindingState.Changed));
-        Assert.AreEqual(3L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(4L, Scalar("PRAGMA user_version"));
         Assert.AreEqual(firstObserved, Scalar("SELECT first_observed FROM findings"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM notification_outbox"));
     }

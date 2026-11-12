@@ -152,7 +152,7 @@ public sealed class LocalImageClassificationTests
             var previous = new FindingObservation(FindingKind.MutableTag, "joyful-stack-happyecho-1", fixture.Container.Id, fixture.Image.Id,
                 Repository, "1.2.3", Digest(fixture.OldManifest), Digest(fixture.NewManifest), true, FindingEvidence.Present,
                 DateTimeOffset.UtcNow.AddMinutes(-1));
-            FindingHistory.Record(database, "clanker", [previous, previous with { Kind = FindingKind.PatchCandidate, Available = "1.2.4" }]);
+            FindingHistory.Record(database, "clanker", [previous, previous with { Kind = FindingKind.VersionCandidate, Available = "1.2.4" }]);
             using var output = new StringWriter();
             var check = await DockerCheck.RunObservedAsync(Inventory, fixture.Checker, output, TextWriter.Null);
             var versions = await DockerVersions.RunObservedAsync(["--repo", Repository], Inventory, fixture.Client, output, TextWriter.Null);

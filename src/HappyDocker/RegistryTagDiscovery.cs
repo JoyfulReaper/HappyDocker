@@ -16,19 +16,20 @@ internal static class RegistryTagDiscovery
     private static readonly Regex NextLink = new(@"\A\s*<([^<>\s]+)>\s*;\s*rel\s*=\s*(?:""next""|next)\s*\z",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.NonBacktracking);
 
-    internal static async Task<TagEnumeration> ListAsync(RegistryClient registry, string repository, CancellationToken cancellationToken)
+    internal static async Task<TagEnumeration> ListAsync(RegistryClient registry, string registryName, string repository,
+        CancellationToken cancellationToken)
     {
         var tags = new HashSet<string>(StringComparer.Ordinal);
         var cursors = new HashSet<string>(StringComparer.Ordinal);
         int count = 0;
         string? last = null;
         int size = PageSize;
-        Uri endpoint = RegistryClient.DockerHubTagEndpoint(repository);
+        Uri endpoint = RegistryClient.TagEndpoint(registryName, repository);
         try
         {
             for (int page = 0; page < MaxPages; page++)
             {
-                var (bytes, links) = await registry.GetTagPageAsync(repository, size, last, cancellationToken);
+                var (bytes, links) = await registry.GetTagPageAsync(registryName, repository, size, last, cancellationToken);
                 using JsonDocument document = JsonValue.Parse(bytes);
                 JsonElement root = document.RootElement;
                 if (JsonValue.String(root, "name") != repository || !root.TryGetProperty("tags", out JsonElement values)

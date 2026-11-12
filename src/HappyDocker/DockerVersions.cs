@@ -69,17 +69,17 @@ public static class DockerVersions
                 string repository = RepositoryName(reference);
                 if (selected is not null && (reference.Repository is null || !selected.ContainsKey(repository))) continue;
                 matched.Add(repository);
-                var version = PatchVersion.Parse(reference.Tag);
-                FindingEvidence evidence = reference.Registry != "docker.io" || reference.IsDigestPinned || version is null
+                var version = ImageVersion.Parse(reference.Tag);
+                FindingEvidence evidence = !RegistryClient.Supports(reference.Registry) || reference.IsDigestPinned || version is null
                     ? FindingEvidence.NotApplicable : FindingEvidence.Incomplete;
                 if (reference.Kind is ImageReferenceKind.Missing or ImageReferenceKind.Invalid) evidence = FindingEvidence.Incomplete;
                 int observationIndex = observations.Count;
-                observations.Add(FindingObservation.ForContainer(container, reference, FindingKind.PatchCandidate, observedAt, evidence));
+                observations.Add(FindingObservation.ForContainer(container, reference, FindingKind.VersionCandidate, observedAt, evidence));
                 output.WriteLine($"{container.Name.TrimStart('/')}  {repository}  Configured tag {reference.Tag ?? "<none>"}");
 
-                if (reference.Registry != "docker.io")
+                if (!RegistryClient.Supports(reference.Registry))
                 {
-                    output.WriteLine("  Unsupported registry. Version discovery supports Docker Hub.");
+                    output.WriteLine("  Unsupported registry. Version discovery supports Docker Hub and GHCR.");
                     continue;
                 }
                 if (reference.IsDigestPinned)
@@ -112,7 +112,7 @@ public static class DockerVersions
 
                 if (enumeration is null)
                 {
-                    enumeration = discoveryCache?.Read(reference.Repository!);
+                    enumeration = discoveryCache?.Read(repository);
                     if (enumeration is null)
                     {
                         if (BudgetExpired() || (selected is null && enumeratedRepositories >= 10))
@@ -125,11 +125,11 @@ public static class DockerVersions
                             try
                             {
                                 DateTimeOffset fetchedAt = discoveryCache?.Now ?? DateTimeOffset.UtcNow;
-                                discoveryCache?.MarkAttempt(reference.Repository!, fetchedAt);
+                                discoveryCache?.MarkAttempt(repository, fetchedAt);
                                 attemptRecorded = true;
-                                enumeration = (await RegistryTagDiscovery.ListAsync(registry, reference.Repository!, deadline.Token))
+                                enumeration = (await RegistryTagDiscovery.ListAsync(registry, reference.Registry!, reference.Repository!, deadline.Token))
                                     with { ObservedAt = fetchedAt };
-                                discoveryCache?.Save(reference.Repository!, enumeration, fetchedAt);
+                                discoveryCache?.Save(repository, enumeration, fetchedAt);
                             }
                             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                             {
@@ -153,7 +153,8 @@ public static class DockerVersions
                 }
                 if (enumeration.CachedAt is { } cached)
                     output.WriteLine($"  Cached tag enumeration from {cached:O}; platform verification runs again.");
-                string? tag = version.HighestCandidate(enumeration.Tags);
+                string[] candidates = version.Candidates(enumeration.Tags);
+                string? tag = candidates.FirstOrDefault();
                 var (deployment, platformError) = RegistryUpdateChecker.ReadDeployment(container, image);
                 if (deployment?.Descriptor?.Kind == ImageDigestKind.ImageIndex
                     && !DockerImageIdentity.Present(deployment.ContainerDescriptor?.Platform))
@@ -169,7 +170,7 @@ public static class DockerVersions
                 }
                 if (tag is null)
                 {
-                    output.WriteLine("  No matching newer patch tag found in the tags examined.");
+                    output.WriteLine("  No matching newer stable version tag found in the tags examined.");
                     if (enumeration.CachedAt is not null)
                     {
                         output.WriteLine("  Cached absence is inconclusive; prior findings are retained until a fresh enumeration.");
@@ -177,43 +178,60 @@ public static class DockerVersions
                     }
                     else if (enumeration.IncompleteReason is null && deployment is not null)
                         observations[observationIndex] = FindingObservation.ForContainer(container, reference,
-                            FindingKind.PatchCandidate, enumeration.ObservedAt ?? observedAt, FindingEvidence.Absent);
+                            FindingKind.VersionCandidate, enumeration.ObservedAt ?? observedAt, FindingEvidence.Absent);
                     continue;
                 }
                 bool verified = false;
                 bool requestFailed = false;
                 bool platformDeferred = false;
+                string? verifiedAlternative = null;
+                var failedRequests = new HashSet<string>(StringComparer.Ordinal);
                 string detail = platformError ?? "";
                 if (deployment is not null)
                 {
                     DockerImageRow platform = deployment.Image;
-                    var key = (tag, platform.Os, platform.Architecture, platform.Variant);
-                    if (!platformResults.TryGetValue(key, out var verification))
+                    foreach (string candidateTag in candidates.Take(5))
                     {
-                        try
+                        var key = (candidateTag, platform.Os, platform.Architecture, platform.Variant);
+                        if (!platformResults.TryGetValue(key, out var verification))
                         {
-                            if (selected is null && BudgetExpired())
-                                verification = (false, "Discovery budget reached; platform verification deferred.", false, true);
-                            else
+                            try
                             {
-                                if (!attemptRecorded)
+                                if (selected is null && BudgetExpired())
+                                    verification = (false, "Discovery budget reached; platform verification deferred.", false, true);
+                                else
                                 {
-                                    discoveryCache?.MarkAttempt(reference.Repository!, discoveryCache.Now);
-                                    attemptRecorded = true;
+                                    if (!attemptRecorded)
+                                    {
+                                        discoveryCache?.MarkAttempt(repository, discoveryCache.Now);
+                                        attemptRecorded = true;
+                                    }
+                                    var result = await checker.VerifyCandidatePlatformAsync(reference, candidateTag, platform, deadline.Token);
+                                    verification = (result.Verified, result.Detail, result.RequestFailed, false);
                                 }
-                                var result = await checker.VerifyCandidatePlatformAsync(reference, tag, platform, deadline.Token);
-                                verification = (result.Verified, result.Detail, result.RequestFailed, false);
                             }
+                            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                            {
+                                verification = selected is null
+                                    ? (false, "Discovery time budget reached; platform verification deferred.", false, true)
+                                    : (false, "Discovery time budget reached; platform is unverified.", true, false);
+                            }
+                            platformResults.Add(key, verification);
                         }
-                        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                        if (candidateTag == tag)
+                            (verified, detail, requestFailed, platformDeferred) = verification;
+                        if (verification.RequestFailed) failedRequests.Add(candidateTag);
+                        if (verification.Deferred)
                         {
-                            verification = selected is null
-                                ? (false, "Discovery time budget reached; platform verification deferred.", false, true)
-                                : (false, "Discovery time budget reached; platform is unverified.", true, false);
+                            platformDeferred = true;
+                            break;
                         }
-                        platformResults.Add(key, verification);
+                        if (verification.Verified)
+                        {
+                            if (candidateTag != tag) verifiedAlternative = candidateTag;
+                            break;
+                        }
                     }
-                    (verified, detail, requestFailed, platformDeferred) = verification;
                 }
 
                 if (platformDeferred)
@@ -224,12 +242,17 @@ public static class DockerVersions
                     continue;
                 }
                 output.WriteLine($"  Candidate {tag} ({(verified ? "platform verified" : "platform unverified")}). {detail}");
-                output.WriteLine("  A patch candidate does not establish compatibility or security.");
+                output.WriteLine($"  Upgrade {version.UpgradeTo(tag)}. Newest matching stable version observed.");
+                if (verifiedAlternative is not null)
+                    output.WriteLine($"  Verified alternative {verifiedAlternative} ({version.UpgradeTo(verifiedAlternative)}; platform verified).");
+                else if (!verified && candidates.Length > 5)
+                    output.WriteLine("  Platform verification is limited to five candidates; further versions remain unverified.");
+                output.WriteLine("  A version candidate does not establish compatibility or security.");
                 if (enumeration.IncompleteReason is null)
-                    observations[observationIndex] = FindingObservation.ForContainer(container, reference, FindingKind.PatchCandidate,
+                    observations[observationIndex] = FindingObservation.ForContainer(container, reference, FindingKind.VersionCandidate,
                         enumeration.ObservedAt ?? observedAt, FindingEvidence.Present, tag, verified,
                         deployment?.ContainerDescriptor?.Digest ?? deployment?.Descriptor?.Digest)
-                        with { PlatformRequestFailed = requestFailed };
+                        with { PlatformRequestFailed = requestFailed, VerifiedAlternative = verifiedAlternative, FailedPlatformRequests = failedRequests };
             }
         }
 
@@ -237,9 +260,9 @@ public static class DockerVersions
         {
             foreach (var (repository, reference) in selected)
                 if (!matched.Contains(repository))
-                    output.WriteLine(reference.Registry == "docker.io"
+                    output.WriteLine(RegistryClient.Supports(reference.Registry)
                         ? $"{repository} has no matching running containers."
-                        : $"{repository} uses an unsupported registry. Version discovery supports Docker Hub.");
+                        : $"{repository} uses an unsupported registry. Version discovery supports Docker Hub and GHCR.");
         }
         return new(inventory.ExitCode, observations);
     }

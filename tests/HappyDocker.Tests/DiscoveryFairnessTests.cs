@@ -121,7 +121,7 @@ public sealed class DiscoveryFairnessTests
             command.CommandText = """
                 INSERT INTO version_discovery_cache(repository, fetched_at, tags_json) VALUES ($repo, $at, $tags)
                 """;
-            command.Parameters.AddWithValue("$repo", $"library/app-{index:D2}");
+            command.Parameters.AddWithValue("$repo", $"docker.io/library/app-{index:D2}");
             command.Parameters.AddWithValue("$at", clock.GetUtcNow().UtcDateTime.ToString("O", CultureInfo.InvariantCulture));
             command.Parameters.AddWithValue("$tags", JsonSerializer.Serialize(new[] { Candidate }));
             command.ExecuteNonQuery();
@@ -169,7 +169,7 @@ public sealed class DiscoveryFairnessTests
         if (version == 1) Execute("DROP TABLE notification_outbox");
         Execute($"PRAGMA user_version = {version}");
         FindingHistory.Record(Database, "clanker", []);
-        Assert.AreEqual(3L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(4L, Scalar("PRAGMA user_version"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM findings WHERE state = 'New'"));
         Assert.AreEqual(version == 1 ? 0L : 1L, Scalar("SELECT count(*) FROM notification_outbox"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM pragma_table_info('version_discovery_cache') WHERE name = 'last_attempt'"));
@@ -244,7 +244,7 @@ public sealed class DiscoveryFairnessTests
         new FindingStateOptions([], Database, "clanker").RecordAsync(run,
             _ => throw new AssertFailedException("Explicit host requires no Docker info."), output ?? TextWriter.Null);
 
-    private FindingObservation Prior(string repository) => new(FindingKind.PatchCandidate, repository.Split('/')[1],
+    private FindingObservation Prior(string repository) => new(FindingKind.VersionCandidate, repository.Split('/')[1],
         "container", "old-image", "docker.io/" + repository, Current, null, Candidate, true,
         FindingEvidence.Present, clock.GetUtcNow().AddMinutes(-1));
 

@@ -16,7 +16,7 @@ public static class DockerCheck
         FindingRun mutable = await ObserveInventoryAsync(inventory, checker, observedAt, output, error, cancellationToken);
         if (inventory.Containers.Count == 0) return mutable;
         output.WriteLine();
-        output.WriteLine("Patch version discovery");
+        output.WriteLine("Version discovery");
         FindingRun patches = await DockerVersions.ObserveInventoryAsync(inventory, registry, checker, null, observedAt,
             output, error, cancellationToken, discoveryCache, discoveryBudget);
         return new(inventory.ExitCode, [.. mutable.Observations, .. patches.Observations]);

@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace HappyDocker;
 
-/// <summary>Only complete Docker Hub tag lists are reused. Platform evidence is always checked again.</summary>
+/// <summary>Only complete tag lists are reused. Keys include the supported registry and repository.</summary>
 public sealed class VersionDiscoveryCache(string databasePath, TimeProvider? timeProvider = null)
 {
     public static TimeSpan Interval => TimeSpan.FromHours(24);
@@ -16,7 +16,7 @@ public sealed class VersionDiscoveryCache(string databasePath, TimeProvider? tim
         command.CommandText = "SELECT repository, last_attempt FROM version_discovery_cache WHERE last_attempt IS NOT NULL";
         var attempts = new Dictionary<string, long>(StringComparer.Ordinal);
         using var reader = command.ExecuteReader();
-        while (reader.Read()) attempts.Add("docker.io/" + reader.GetString(0), reader.GetInt64(1));
+        while (reader.Read()) attempts.Add(reader.GetString(0), reader.GetInt64(1));
         return attempts;
     });
 

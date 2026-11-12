@@ -14,10 +14,10 @@ public static class NotificationOutbox
         string destinationKey, IReadOnlyList<FindingTransition> transitions)
     {
         var groups = transitions.Where(transition => transition.State is FindingState.New or FindingState.Changed
-                && transition.Observation.Evidence == FindingEvidence.Present && transition.Observation.PlatformVerified == true)
+                && transition.Observation.Evidence == FindingEvidence.Present && transition.Observation.HasVerifiedCandidate)
             .GroupBy(transition => (transition.State, transition.Observation.Kind, transition.Observation.Repository,
                 transition.Observation.ConfiguredTag, transition.Observation.ImageId, transition.Observation.DeployedDigest,
-                transition.Observation.Available));
+                transition.Observation.Available, transition.Observation.PlatformVerified, transition.Observation.VerifiedAlternative));
         foreach (var group in groups)
         {
             using SqliteCommand command = connection.CreateCommand();
@@ -154,11 +154,15 @@ public static class NotificationOutbox
         string[] names = group.Select(item => item.Observation.ContainerName).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         string containers = string.Join(", ", names.Take(10).Select(name => OneLine(name, 48)));
         if (names.Length > 10) containers += $" (+{names.Length - 10} more)";
-        string type = observation.Kind == FindingKind.MutableTag ? "mutable-tag update" : "patch candidate";
-        string caution = observation.Kind == FindingKind.PatchCandidate ? "\nReview compatibility and security separately." : "";
-        string message = $"{first.State} {type} · platform verified{caution}\n"
+        string type = observation.Kind == FindingKind.MutableTag ? "mutable-tag update"
+            : $"{observation.Upgrade?.ToString().ToLowerInvariant() ?? "unclassified"} version candidate";
+        string caution = observation.Kind == FindingKind.VersionCandidate ? "\nReview compatibility and security separately." : "";
+        string alternative = observation.AlternativeUpgrade is { } upgrade
+            ? $"\nVerified alternative {OneLine(observation.VerifiedAlternative, 160)} ({upgrade.ToString().ToLowerInvariant()}; platform verified)" : "";
+        string platform = observation.PlatformVerified == true ? "platform verified" : "newest platform unverified";
+        string message = $"{first.State} {type} · {platform}{caution}\n"
             + $"Host {OneLine(host, 135)}\nRepository {OneLine(observation.Repository, 255)}\n"
-            + $"Current tag {OneLine(observation.ConfiguredTag, 128)}\nAvailable {OneLine(observation.Available, 160)}\n"
+            + $"Current tag {OneLine(observation.ConfiguredTag, 128)}\nAvailable {OneLine(observation.Available, 160)}{alternative}\n"
             + $"Containers {containers}\nObserved {observation.ObservedAt.UtcDateTime:yyyy-MM-dd HH:mm} UTC";
         var bounded = new StringBuilder();
         int bytes = 0;

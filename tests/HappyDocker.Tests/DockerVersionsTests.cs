@@ -14,10 +14,10 @@ public sealed class DockerVersionsTests
     private const string Candidate = "2.14.10-alpine";
 
     [TestMethod]
-    public async Task NumericPatchSelection_RequiresSameMajorMinorAndExactVariant()
+    public async Task NumericVersionSelection_ConsidersMajorMinorAndExactVariant()
     {
         using var fixture = Fixture();
-        fixture.SetTag(fixture.NewManifest, Candidate);
+        fixture.SetTag(fixture.NewManifest, "3.14.0-alpine");
         fixture.Intercept = request => IsTagList(request) ? Tags(fixture.Repository,
             ["2.14.7-alpine", CurrentTag, "2.14.9-alpine", Candidate, "2.14.100-Alpine", "2.14.110",
              "2.14.120-alpine3.22", "2.15.0-alpine", "3.14.0-alpine", "2.14.999-alpine-rc1", "2.14.99-01",
@@ -25,7 +25,8 @@ public sealed class DockerVersionsTests
         var result = await RunAsync(fixture);
         Assert.AreEqual(0, result.ExitCode);
         Assert.Contains($"Configured tag {CurrentTag}", result.Output);
-        Assert.Contains($"Candidate {Candidate} (platform verified)", result.Output);
+        Assert.Contains("Candidate 3.14.0-alpine (platform verified)", result.Output);
+        Assert.Contains("Upgrade Major", result.Output);
         Assert.Contains("does not establish compatibility or security", result.Output);
         Assert.HasCount(3, fixture.Requests);
     }
@@ -92,8 +93,8 @@ public sealed class DockerVersionsTests
         fixture.Intercept = request => IsTagList(request) ? Tags(fixture.Repository, [Candidate]) : null;
         var second = fixture.Container with { Id = "second", Name = "/another-nats", ConfiguredImage = "nats:" + CurrentTag };
         var unrelated = fixture.Container with { Id = "third", Name = "/unselected", ConfiguredImage = "redis:7.2.1" };
-        var unsupported = fixture.Container with { Id = "fourth", Name = "/ghcr", ConfiguredImage = "ghcr.io/org/app:1.2.3" };
-        var result = await RunAsync(fixture, ["--repo", Repo, "--repo", "nats", "--repo", "ghcr.io/org/app", "--repo", "library/not-running"],
+        var unsupported = fixture.Container with { Id = "fourth", Name = "/unsupported", ConfiguredImage = "registry.example/org/app:1.2.3" };
+        var result = await RunAsync(fixture, ["--repo", Repo, "--repo", "nats", "--repo", "registry.example/org/app", "--repo", "library/not-running"],
             [fixture.Container, second, unrelated, unsupported]);
         Assert.Contains("another-nats", result.Output);
         Assert.Contains("Unsupported registry", result.Output);

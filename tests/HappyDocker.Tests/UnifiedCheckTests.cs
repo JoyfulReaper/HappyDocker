@@ -30,7 +30,7 @@ public sealed class UnifiedCheckTests
         fixture.SetTag(fixture.NewManifest);
         var result = await Run(fixture);
         Assert.AreEqual(FindingEvidence.Present, OfKind(result.Run, FindingKind.MutableTag).Evidence);
-        Assert.AreEqual(FindingEvidence.NotApplicable, OfKind(result.Run, FindingKind.PatchCandidate).Evidence);
+        Assert.AreEqual(FindingEvidence.NotApplicable, OfKind(result.Run, FindingKind.VersionCandidate).Evidence);
         Assert.AreEqual(FindingRunStatus.Complete, result.Run.Status);
         Assert.IsFalse(fixture.Requests.Any(request => request.Path.EndsWith("/tags/list")));
         AssertInventoryOnce(result.Commands);
@@ -43,15 +43,43 @@ public sealed class UnifiedCheckTests
     {
         using var fixture = Fixture();
         if (changedTag) fixture.SetTag(fixture.NewManifest);
+        fixture.SetTag(fixture.NewManifest, "3.14.99-alpine");
         fixture.Intercept = request => IsTags(request) ? Tags(fixture.Repository,
             [Current, Candidate, "2.14.99", "2.15.0-alpine", "3.14.99-alpine", "2.14.99-alpine-rc1"]) : null;
         var result = await Run(fixture);
         Assert.AreEqual(changedTag ? FindingEvidence.Present : FindingEvidence.Absent, OfKind(result.Run, FindingKind.MutableTag).Evidence);
-        var patch = OfKind(result.Run, FindingKind.PatchCandidate);
+        var patch = OfKind(result.Run, FindingKind.VersionCandidate);
         Assert.AreEqual(FindingEvidence.Present, patch.Evidence);
-        Assert.AreEqual(Candidate, patch.Available);
+        Assert.AreEqual("3.14.99-alpine", patch.Available);
+        Assert.AreEqual(VersionUpgrade.Major, patch.Upgrade);
         Assert.IsTrue(patch.PlatformVerified ?? false);
-        Assert.Contains("Patch version discovery", result.Output);
+        Assert.Contains("Version discovery", result.Output);
+        AssertInventoryOnce(result.Commands);
+    }
+
+    [TestMethod]
+    public async Task NtfyWithLowercaseVPrefixAutomaticallyDiscoversAndVerifiesMinorUpgrade()
+    {
+        using var fixture = new RegistryFixture(repository: "binwiederhier/ntfy", tag: "v2.26.0");
+        fixture.UseContainerd(true);
+        fixture.Container = fixture.Container with { Name = "/ntfy", ConfiguredImage = "binwiederhier/ntfy:v2.26.0" };
+        // The next patch is hypothetical. Only the mocked registry advertises it here.
+        fixture.SetTag(Index(Descriptor(fixture.NewManifest)), "v2.26.1");
+        fixture.SetTag(Index(Descriptor(fixture.NewManifest)), "v2.27.0");
+        fixture.Intercept = request => IsTags(request) ? Tags(fixture.Repository,
+            ["v2.26.0", "v2.26.1", "2.26.99", "v2.27.0", "v2.26.99-alpine", "v2.26.99-rc1"]) : null;
+        var result = await Run(fixture);
+        Assert.AreEqual(FindingRunStatus.Complete, result.Run.Status);
+        Assert.AreEqual(FindingEvidence.Absent, OfKind(result.Run, FindingKind.MutableTag).Evidence);
+        var patch = OfKind(result.Run, FindingKind.VersionCandidate);
+        Assert.AreEqual("docker.io/binwiederhier/ntfy", patch.Repository);
+        Assert.AreEqual("v2.26.0", patch.ConfiguredTag);
+        Assert.AreEqual("v2.27.0", patch.Available);
+        Assert.AreEqual(VersionUpgrade.Minor, patch.Upgrade);
+        Assert.AreEqual(FindingEvidence.Present, patch.Evidence);
+        Assert.IsTrue(patch.PlatformVerified ?? false);
+        Assert.Contains("binwiederhier/ntfy:v2.26.0", result.Output);
+        Assert.Contains("Candidate v2.27.0 (platform verified)", result.Output);
         AssertInventoryOnce(result.Commands);
     }
 
@@ -78,7 +106,7 @@ public sealed class UnifiedCheckTests
         Assert.HasCount(2, messages);
         Assert.IsTrue(messages.All(message => message.Contains("nats, nats-two", StringComparison.Ordinal)));
         Assert.IsTrue(messages.Any(message => message.Contains("mutable-tag update", StringComparison.Ordinal)));
-        Assert.IsTrue(messages.Any(message => message.Contains("patch candidate", StringComparison.Ordinal)));
+        Assert.IsTrue(messages.Any(message => message.Contains("patch version candidate", StringComparison.Ordinal)));
         Assert.AreEqual(4L, Scalar("SELECT count(*) FROM findings"));
         Assert.AreEqual(0L, Scalar("SELECT count(*) FROM notification_outbox"));
         Assert.AreEqual(0, await options.RecordAsync(result.Run, NoDocker, TextWriter.Null, notifier));
@@ -94,19 +122,22 @@ public sealed class UnifiedCheckTests
     {
         using var fixture = Fixture(tag);
         var run = (await Run(fixture)).Run;
-        Assert.AreEqual(FindingEvidence.NotApplicable, OfKind(run, FindingKind.PatchCandidate).Evidence);
+        Assert.AreEqual(FindingEvidence.NotApplicable, OfKind(run, FindingKind.VersionCandidate).Evidence);
         Assert.AreEqual(0, run.IncompleteCount);
         Assert.IsFalse(fixture.Requests.Any(request => request.Path.EndsWith("/tags/list")));
     }
 
     [TestMethod]
-    public async Task GhcrMutableTagsStillWorkWhileDiscoveryIsNotApplicable()
+    public async Task GhcrMutableTagsAndVersionDiscoveryWorkTogether()
     {
         using var fixture = new RegistryFixture(registry: "ghcr.io", tag: Current);
         fixture.UseContainerd(false);
+        fixture.SetTag(fixture.NewManifest, "3.0.0-alpine");
+        fixture.Intercept = request => IsTags(request) ? Tags(fixture.Repository, [Current, "3.0.0-alpine"]) : null;
         var run = (await Run(fixture)).Run;
         Assert.AreEqual(FindingEvidence.Absent, OfKind(run, FindingKind.MutableTag).Evidence);
-        Assert.AreEqual(FindingEvidence.NotApplicable, OfKind(run, FindingKind.PatchCandidate).Evidence);
+        Assert.AreEqual(FindingEvidence.Present, OfKind(run, FindingKind.VersionCandidate).Evidence);
+        Assert.AreEqual(VersionUpgrade.Major, OfKind(run, FindingKind.VersionCandidate).Upgrade);
         Assert.AreEqual(FindingRunStatus.Complete, run.Status);
     }
 
@@ -157,12 +188,12 @@ public sealed class UnifiedCheckTests
         scheduled.Intercept = request => IsTags(request) ? throw new AssertFailedException("Tag listing should be cached.") : null;
         var repeated = await Run(scheduled, cache: cache);
         Assert.Contains("Cached tag enumeration", repeated.Output);
-        Assert.IsTrue(OfKind(repeated.Run, FindingKind.PatchCandidate).PlatformVerified ?? false);
+        Assert.IsTrue(OfKind(repeated.Run, FindingKind.VersionCandidate).PlatformVerified ?? false);
         Assert.IsTrue(scheduled.Requests.Any(request => request.Path.EndsWith("/manifests/" + Candidate)));
         Assert.AreEqual(0, await options.RecordAsync(repeated.Run, NoDocker, TextWriter.Null, notifier));
         Assert.AreEqual(2, messages);
-        Assert.AreEqual(Candidate, Scalar("SELECT available FROM findings WHERE kind = 'PatchCandidate'"));
-        Assert.AreEqual("Known", Scalar("SELECT state FROM findings WHERE kind = 'PatchCandidate'"));
+        Assert.AreEqual(Candidate, Scalar("SELECT available FROM findings WHERE kind = 'VersionCandidate'"));
+        Assert.AreEqual("Known", Scalar("SELECT state FROM findings WHERE kind = 'VersionCandidate'"));
         clock.Advance(TimeSpan.FromHours(19));
         using var later = Fixture();
         later.SetTag(later.NewManifest);
@@ -170,8 +201,8 @@ public sealed class UnifiedCheckTests
         later.Intercept = request => IsTags(request) ? Tags(later.Repository, [Next]) : null;
         Assert.AreEqual(0, await options.RecordAsync((await Run(later, cache: cache)).Run, NoDocker, TextWriter.Null, notifier));
         Assert.AreEqual(3, messages);
-        Assert.AreEqual(Next, Scalar("SELECT available FROM findings WHERE kind = 'PatchCandidate'"));
-        Assert.AreEqual("Changed", Scalar("SELECT state FROM findings WHERE kind = 'PatchCandidate'"));
+        Assert.AreEqual(Next, Scalar("SELECT available FROM findings WHERE kind = 'VersionCandidate'"));
+        Assert.AreEqual("Changed", Scalar("SELECT state FROM findings WHERE kind = 'VersionCandidate'"));
     }
 
     [TestMethod]
@@ -185,12 +216,12 @@ public sealed class UnifiedCheckTests
         FindingHistory.Record(Database, "clanker", [PriorPatch(fixture, clock.GetUtcNow().AddMinutes(1))]);
         clock.Advance(TimeSpan.FromHours(6));
         var cached = await Run(fixture, cache: cache);
-        Assert.AreEqual(FindingEvidence.NotApplicable, OfKind(cached.Run, FindingKind.PatchCandidate).Evidence);
+        Assert.AreEqual(FindingEvidence.NotApplicable, OfKind(cached.Run, FindingKind.VersionCandidate).Evidence);
         Assert.IsEmpty(FindingHistory.Record(Database, "clanker", cached.Run.Observations));
         Assert.AreEqual("New", Scalar("SELECT state FROM findings"));
         clock.Advance(TimeSpan.FromHours(19));
         var refreshed = (await Run(fixture, cache: cache)).Run;
-        Assert.AreEqual(FindingEvidence.Absent, OfKind(refreshed, FindingKind.PatchCandidate).Evidence);
+        Assert.AreEqual(FindingEvidence.Absent, OfKind(refreshed, FindingKind.VersionCandidate).Evidence);
         Assert.AreEqual(FindingState.Resolved, FindingHistory.Record(Database, "clanker", refreshed.Observations).Single().State);
     }
 
@@ -228,7 +259,7 @@ public sealed class UnifiedCheckTests
         };
         var failed = (await Run(fixture, cache: cache)).Run;
         Assert.AreEqual(FindingRunStatus.Partial, failed.Status);
-        Assert.AreEqual(FindingEvidence.Incomplete, OfKind(failed, FindingKind.PatchCandidate).Evidence);
+        Assert.AreEqual(FindingEvidence.Incomplete, OfKind(failed, FindingKind.VersionCandidate).Evidence);
         Assert.IsEmpty(FindingHistory.Record(Database, "clanker", failed.Observations));
         Assert.AreEqual("New", Scalar("SELECT state FROM findings"));
         Assert.AreEqual(0L, Scalar("SELECT count(*) FROM version_discovery_cache WHERE fetched_at IS NOT NULL"));
@@ -256,7 +287,7 @@ public sealed class UnifiedCheckTests
         clock.Advance(TimeSpan.FromHours(6));
         using var early = Fixture();
         var waiting = (await Run(early, cache: cache)).Run;
-        Assert.AreEqual(FindingEvidence.Incomplete, OfKind(waiting, FindingKind.PatchCandidate).Evidence);
+        Assert.AreEqual(FindingEvidence.Incomplete, OfKind(waiting, FindingKind.VersionCandidate).Evidence);
         Assert.IsFalse(early.Requests.Any(request => request.Path.EndsWith("/tags/list")));
         clock.Advance(TimeSpan.FromDays(3));
         using var ready = Fixture();
@@ -303,7 +334,7 @@ public sealed class UnifiedCheckTests
         var timed = await DockerCheck.RunObservedAsync(Inventory(fixture, [fixture.Container]), registry, TextWriter.Null, TextWriter.Null,
             discoveryCache: cache, discoveryBudget: TimeSpan.FromMilliseconds(25));
         Assert.AreEqual(FindingEvidence.Absent, OfKind(timed, FindingKind.MutableTag).Evidence);
-        Assert.AreEqual(FindingEvidence.Deferred, OfKind(timed, FindingKind.PatchCandidate).Evidence);
+        Assert.AreEqual(FindingEvidence.Deferred, OfKind(timed, FindingKind.VersionCandidate).Evidence);
         Assert.AreEqual(FindingRunStatus.Deferred, timed.Status);
         Assert.AreEqual(FindingRunStatus.Complete, (await Run(fixture, cache: cache)).Run.Status);
     }
@@ -331,7 +362,7 @@ public sealed class UnifiedCheckTests
         fixture.SetTag(Index(Descriptor(armManifest, architecture: "arm64")), Candidate);
         var result = await Run(fixture);
         Assert.AreEqual(FindingEvidence.Absent, OfKind(result.Run, FindingKind.MutableTag).Evidence);
-        var patch = OfKind(result.Run, FindingKind.PatchCandidate);
+        var patch = OfKind(result.Run, FindingKind.VersionCandidate);
         Assert.AreEqual(FindingEvidence.Present, patch.Evidence);
         Assert.IsFalse(patch.PlatformVerified ?? true);
         Assert.AreEqual(FindingRunStatus.Partial, result.Run.Status);
@@ -421,7 +452,7 @@ public sealed class UnifiedCheckTests
     [TestMethod]
     public async Task VersionTwoMigrationPreservesPendingNotificationsAndFindingEligibility()
     {
-        var observation = new FindingObservation(FindingKind.PatchCandidate, "nats", "container", "image",
+        var observation = new FindingObservation(FindingKind.VersionCandidate, "nats", "container", "image",
             "docker.io/library/nats", Current, null, Candidate, false, FindingEvidence.Present, DateTimeOffset.UtcNow);
         FindingHistory.Record(Database, "clanker", [observation], "destination");
         FindingHistory.Record(Database, "clanker", [observation with
@@ -432,9 +463,9 @@ public sealed class UnifiedCheckTests
         Execute("DROP TABLE version_discovery_cache; PRAGMA user_version = 2");
         using var fixture = Fixture();
         await Run(fixture, cache: new VersionDiscoveryCache(Database));
-        Assert.AreEqual(3L, Scalar("PRAGMA user_version"));
-        Assert.AreEqual("destination", Scalar("SELECT pending_notification_destination FROM findings WHERE kind = 'PatchCandidate'"));
-        Assert.AreEqual("New", Scalar("SELECT pending_notification_state FROM findings WHERE kind = 'PatchCandidate'"));
+        Assert.AreEqual(4L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual("destination", Scalar("SELECT pending_notification_destination FROM findings WHERE kind = 'VersionCandidate'"));
+        Assert.AreEqual("New", Scalar("SELECT pending_notification_state FROM findings WHERE kind = 'VersionCandidate'"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM notification_outbox"));
     }
 
@@ -471,7 +502,7 @@ public sealed class UnifiedCheckTests
     }
 
     private static FindingObservation PriorPatch(RegistryFixture fixture, DateTimeOffset at) =>
-        new(FindingKind.PatchCandidate, "nats", fixture.Container.Id, fixture.Image.Id, "docker.io/library/nats",
+        new(FindingKind.VersionCandidate, "nats", fixture.Container.Id, fixture.Image.Id, "docker.io/library/nats",
             Current, null, Candidate, true, FindingEvidence.Present, at);
     private static FindingObservation OfKind(FindingRun run, FindingKind kind) => run.Observations.Single(observation => observation.Kind == kind);
     private static Task<DockerCommandResult> NoDocker(string[] _) => throw new AssertFailedException("Explicit host requires no Docker info.");

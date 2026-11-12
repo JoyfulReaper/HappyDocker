@@ -20,19 +20,18 @@ try
 {
     if (args[0] == "scan")
         return await DockerScan.RunAsync(arguments => RunDockerAsync(arguments), Console.Out, Console.Error);
-    if (args[0] == "versions")
-    {
-        using var anonymousRegistry = new RegistryClient();
-        if (options.DatabasePath is null)
-            return await DockerVersions.RunAsync(options.CommandArguments, RunDockerAsync, anonymousRegistry, Console.Out, Console.Error);
-        FindingRun versions = await DockerVersions.RunObservedAsync(options.CommandArguments, RunDockerAsync, anonymousRegistry, Console.Out, Console.Error);
-        return await options.RecordAsync(versions, RunDockerAsync, Console.Out);
-    }
     GhcrCredentials? credentials = GhcrCredentials.Load(
         Environment.GetEnvironmentVariable(GhcrCredentials.UsernameVariable),
         Environment.GetEnvironmentVariable(GhcrCredentials.TokenFileVariable),
         Environment.GetEnvironmentVariable(GhcrCredentials.TokenVariable));
     using var registry = new RegistryClient(ghcrCredentials: credentials);
+    if (args[0] == "versions")
+    {
+        if (options.DatabasePath is null)
+            return await DockerVersions.RunAsync(options.CommandArguments, RunDockerAsync, registry, Console.Out, Console.Error);
+        FindingRun versions = await DockerVersions.RunObservedAsync(options.CommandArguments, RunDockerAsync, registry, Console.Out, Console.Error);
+        return await options.RecordAsync(versions, RunDockerAsync, Console.Out);
+    }
     if (options.DatabasePath is null)
         return await DockerCheck.RunAsync(RunDockerAsync, registry, Console.Out, Console.Error);
     FindingRun check = await DockerCheck.RunObservedAsync(RunDockerAsync, registry, Console.Out, Console.Error,

@@ -74,14 +74,19 @@ public sealed class RegistryClient : IDisposable
         }, cancellationToken);
     }
 
-    internal static Uri DockerHubTagEndpoint(string repository) => new($"https://registry-1.docker.io/v2/{repository}/tags/list");
+    internal static Uri TagEndpoint(string registry, string repository)
+    {
+        if (!Supports(registry)) throw new RegistryException(UpdateStatus.UnsupportedRegistry, "Registry is not supported.");
+        string host = registry == "docker.io" ? "registry-1.docker.io" : "ghcr.io";
+        return new($"https://{host}/v2/{repository}/tags/list");
+    }
 
-    internal Task<(byte[] Bytes, string[] Links)> GetTagPageAsync(string repository, int pageSize, string? last,
+    internal Task<(byte[] Bytes, string[] Links)> GetTagPageAsync(string registry, string repository, int pageSize, string? last,
         CancellationToken cancellationToken)
     {
         string cursor = last is null ? "" : $"&last={Uri.EscapeDataString(last)}";
-        var uri = new Uri(FormattableString.Invariant($"{DockerHubTagEndpoint(repository)}?n={pageSize}{cursor}"));
-        return ReadAsync(uri, "docker.io", repository, false, 64 * 1024, (response, bytes) =>
+        var uri = new Uri(FormattableString.Invariant($"{TagEndpoint(registry, repository)}?n={pageSize}{cursor}"));
+        return ReadAsync(uri, registry, repository, false, 64 * 1024, (response, bytes) =>
         {
             if (response.StatusCode != HttpStatusCode.OK)
                 throw new RegistryException(UpdateStatus.Unknown, "Registry returned an unexpected tag page status.");
