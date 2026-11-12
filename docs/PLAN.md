@@ -68,18 +68,21 @@ Remaining milestone work:
 
 ## Milestone 4 — state and notifications (WSIWOT #277–278)
 
-**Finding history implemented:** `check` and `versions` can take `--state <database-path>` and optional `--host <id>`. Without a label, the Docker daemon ID scopes findings across hosts. One versioned SQLite table tracks mutable-tag changes and patch candidates by host, container name, repository, and finding type. The CLI writes observations in a transaction using UTC timestamps and retains resolved rows. Linux database files are private, and the CLI uses SQLite's default rollback journal. See the [README state directory and usage examples](../README.md#keep-finding-history).
+**Finding history implemented:** `check` and `versions` can take `--state <database-path>` and optional `--host <id>`. Without a label, the Docker daemon ID scopes findings across hosts. A versioned SQLite findings table tracks mutable-tag changes and patch candidates by host, container name, repository, and finding type. The CLI writes observations in a transaction using UTC timestamps and retains resolved rows. Linux database files are private, and the CLI uses SQLite's default rollback journal. See the [README state directory and usage examples](../README.md#keep-finding-history).
 
 Structured observations distinguish a conclusive absence, incomplete evidence, and expected skips. Only conclusive absence resolves a finding. Expected skips stay outside the incomplete count, and independently successful observations can be recorded in a partial run. Platform verification can improve for a known patch candidate, and a temporary registry failure leaves earlier verification in history while the current report identifies the candidate as unverified. Container removal, renaming, or a repository switch does not automatically resolve a previous finding. History tracks the latest finding per key without an event log or retention policy.
 
+**Optional ntfy delivery implemented:** `--notify-ntfy <topic-url>` requires state tracking. New or changed verified findings are grouped per invocation and saved in a transactional outbox alongside finding transitions. Schema version 2 adds the outbox and migrates version 1 history intact. Known findings stay quiet when delivery is enabled later. HTTP success removes a pending entry, failures retain it, and subsequent enabled commands retry pending work, including runs with no new findings. Bounded batches, persisted backoff, server Retry-After, and delivery leases coordinate concurrent commands and interrupted runs. HTTP delivery provides at-least-once semantics, with possible duplicates across an acceptance/commit interruption.
+
+Unverified New/Changed patch candidates observed with delivery enabled retain their destination hash and original event in nullable finding columns. Verification of the same candidate and deployment can then consume that eligibility and enqueue one alert while the finding remains Known. Changes or resolution clear obsolete eligibility, and pre-existing Known findings acquire no retroactive eligibility. Marker consumption and outbox insertion share the finding transaction. These columns remain part of the development schema version 2, including initialization for earlier development v2 files.
+
+The optional token comes from `HAPPYDOCKER_NTFY_TOKEN_FILE`, authenticated delivery requires HTTPS, and redirects are disabled. Credentials are excluded from Docker's child environment and SQLite. Delivery failures have a separate summary and exit code while completed Docker/registry observations remain stored. See the [notification usage and limits](../README.md#send-ntfy-alerts). Mocked tests cover Clanker-style inventory, migration, delivery failures, rate limits, concurrency, retry recovery, and credential isolation.
+
 Remaining milestone work:
 
-- Define how to store advisory findings, notification delivery history, and retention policies.
-- Notify once for a meaningful new state; notify again when a newer update or a materially changed security finding appears.
-- Separate alerts for `image update`, `newer version candidate`, and `security finding`.
-- Include host, container, image, current/available version or digest, affected package/advisory, fix availability, and confidence/uncertainty.
-- Send through existing ntfy infrastructure using ordinary HTTPS or configured internal URL; store credentials outside git.
-- Include a manual `scan --no-notify` mode for diagnostics.
+- Define advisory finding storage and notification eligibility after the scanner adapter exists.
+- Evaluate permanent delivery audit and retention policies if operational needs justify them.
+- Validate explicitly configured delivery with a private topic in the deployed environment.
 
 ## Milestone 5 — deployment (WSIWOT #280 and optionally #279)
 

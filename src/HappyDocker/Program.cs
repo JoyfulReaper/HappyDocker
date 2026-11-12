@@ -63,28 +63,13 @@ catch (Win32Exception exception)
 static void WriteUsage()
 {
     Console.Error.WriteLine("Usage: happydocker scan");
-    Console.Error.WriteLine("       happydocker check [--state <database-path> [--host <id>]]");
-    Console.Error.WriteLine("       happydocker versions --repo <repository> [--repo <repository> ...] [--state <database-path> [--host <id>]]");
+    Console.Error.WriteLine("       happydocker check [--state <database-path> [--host <id>] [--notify-ntfy <topic-url>]]");
+    Console.Error.WriteLine("       happydocker versions --repo <repository> [--repo <repository> ...] [--state <database-path> [--host <id>] [--notify-ntfy <topic-url>]]");
 }
 
 static async Task<DockerCommandResult> RunDockerAsync(params string[] arguments)
 {
-    var startInfo = new ProcessStartInfo("docker")
-    {
-        RedirectStandardOutput = true,
-        RedirectStandardError = true,
-        UseShellExecute = false,
-        CreateNoWindow = true
-    };
-
-    startInfo.Environment.Remove(GhcrCredentials.UsernameVariable);
-    startInfo.Environment.Remove(GhcrCredentials.TokenFileVariable);
-    startInfo.Environment.Remove(GhcrCredentials.TokenVariable);
-
-    foreach (string argument in arguments)
-    {
-        startInfo.ArgumentList.Add(argument);
-    }
+    ProcessStartInfo startInfo = DockerProcess.CreateStartInfo(arguments);
 
     using var process = Process.Start(startInfo)
         ?? throw new InvalidOperationException("Failed to start Docker.");

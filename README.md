@@ -27,9 +27,10 @@ Implemented:
 - `check` determines whether the configured tag resolves to a different image for the deployed platform. Docker Hub and GHCR use anonymous access by default. Private GHCR packages can use explicitly configured credentials.
 - `versions` discovers newer patch-tag candidates for running containers in explicitly selected Docker Hub repositories.
 - `check` and `versions` can record finding history in an opt-in local SQLite database.
+- State-enabled commands can send explicitly configured ntfy alerts through a transactional notification outbox.
 - Registry tests use mocked HTTP responses, including authentication, redirects, rate limits, timeouts, multi-architecture indexes, unchanged NATS version tags, both Docker image stores, synthetic local repository digests, and incomplete or inconsistent metadata. Clanker's pulled NATS and build-only HappyQOTD identity examples are regression fixtures.
 
-Vulnerability scanning, scheduling, notifications, and automatic updates remain planned.
+Vulnerability scanning, scheduling, and automatic updates remain planned.
 
 ### Discover newer patch tags
 
@@ -65,13 +66,39 @@ HappyDocker creates the database on first use. It creates new database files wit
 
 By default, history is keyed to the daemon ID returned by `docker info`. If that ID is unavailable or you need history to survive daemon replacement, add a unique, stable `--host clanker` to each state-enabled invocation for that host. Explicit host labels allow ASCII letters, digits, periods, hyphens, and underscores. Switching between a label and the daemon ID starts a separate history.
 
-Schema version 1 keeps one row per host, logical container name, normalized repository, and finding type. Rows store the latest finding's container and image IDs, configured tag, deployed digest when available, available manifest digest or patch tag, platform verification, state, and first and last observation times in UTC. Ordinary container recreation preserves the logical key. Registry credentials and responses are excluded. The database retains resolved rows and does not keep a per-run event log or prune old rows.
+Schema version 2 keeps one finding row per host, logical container name, normalized repository, and finding type, plus a notification outbox. Version 1 databases migrate transactionally, preserving existing finding history. Finding rows store the latest finding's container and image IDs, configured tag, deployed digest when available, available manifest digest or patch tag, platform verification, state, and first and last observation times in UTC. Ordinary container recreation preserves the logical key. Registry credentials and responses are excluded. The database retains resolved findings and does not keep a per-run event log or prune old finding rows.
 
 The state summary counts new, known, changed, resolved, and incomplete observations. A different candidate tag or relevant image digest can change a finding. A finding that returns after resolution counts as new. Verification confidence is tracked separately, and complete tag enumeration can record an unverified candidate. If authentication, rate limiting, or a registry outage prevents rechecking the same candidate for the same deployment, the current report marks it unverified and history retains the earlier verification. Successful verification can strengthen a known finding.
 
 Expected skips, including local builds, digest pins, unsupported registries, and unrecognized version tags in `versions`, are outside the incomplete count. Truncated enumeration leaves prior state intact, even when the report shows a candidate from the pages examined. Only a conclusive check for the same logical container, repository, and finding type can resolve a finding. Successful observations are saved when an independent check fails.
 
 With `--state`, exit code `0` means the relevant checks completed, `2` means some findings could be evaluated alongside incomplete checks, and `1` means the run could not evaluate any checks or save state. A Docker inventory failure retains Docker's exit code. Finding an update or verified patch candidate does not itself cause an error. Omitting `--state` keeps the existing report and exit behavior.
+
+### Send ntfy alerts
+
+Add a topic URL to a state-enabled command to publish new or changed mutable-tag updates and platform-verified patch candidates.
+
+```sh
+state="$HOME/.local/state/happydocker/findings.db"
+happydocker check --state "$state" --host clanker \
+  --notify-ntfy https://ntfy.example.com/docker-alerts
+happydocker versions --repo docker.io/library/nats --state "$state" --host clanker \
+  --notify-ntfy https://ntfy.example.com/docker-alerts
+```
+
+For an authenticated topic, put its bearer token in a private file and set `HAPPYDOCKER_NTFY_TOKEN_FILE` to that file's path. Use mode `0600` for the file and a private parent directory. A trailing newline is accepted. Authenticated requests require HTTPS. An explicitly selected HTTP topic can be used anonymously on an internal network. URLs accept a topic path without embedded credentials, query parameters, or fragments. HappyDocker uses ntfy's documented text POST and bearer authentication. [ntfy publishing documentation](https://docs.ntfy.sh/publish/)
+
+Alerts include the host, container names, repository, configured tag, available digest or patch tag, finding type, platform verification, and observation time. Matching findings from a command are grouped, showing up to ten container names and a count for the remainder. Patch candidates still require application compatibility and security review. An unverified New/Changed patch candidate observed with notifications enabled retains eligibility for its selected destination. Once the same candidate and deployment are verified, its finding state remains Known and one alert is queued for the original New/Changed event. Findings already known before notifications were enabled stay quiet.
+
+Finding transitions and pending alerts are committed together before delivery. An ntfy outage leaves successful observations saved. The outbox stores bounded message snapshots, a hash of the destination URL, attempt counts, retry deadlines, and delivery leases. Tokens, authentication headers, raw responses, and the destination URL are excluded. Successful HTTP responses remove the pending entry. Failed entries remain available on subsequent invocations using the same database, host identifier, and topic URL. Changing the host label or topic selects a separate queue. A queued alert describes the observation when it was created, so a delayed message may describe an earlier deployment.
+
+Deferred eligibility is stored on each finding in nullable `pending_notification_destination` and `pending_notification_state` columns. These hold the destination hash and original New/Changed event while verification is pending. They are cleared atomically when an alert is queued, the candidate or deployment changes, or the finding resolves. Temporary verification failures retain eligibility. Schema version 2 initializes these columns without backfilling alerts when opening version 1 or earlier development version 2 databases.
+
+Each enabled invocation attempts at most ten messages within a 30-second delivery budget, with an eight-second timeout per request. Delivery stops after the first failure. Retry delays start at one minute and grow to one hour, and a longer server `Retry-After` is honored. A destination cooldown also applies to newly queued messages. Commands use SQLite transactions and 60-second leases to coordinate delivery, and expired leases can be retried after an interrupted process. HTTP redirects are disabled. Messages are capped at 3,800 UTF-8 bytes, and response bodies are discarded.
+
+The notification summary reports sent, failed, and pending counts separately. Exit code `3` indicates notification failure or remaining pending work, including delayed retries and batches exceeding the delivery limit. This takes precedence over the finding outcome, while a nonzero Docker inventory exit code is retained. Pending alerts are retried even when the enabled command observes no new findings. Use another invocation after the retry deadline to continue delivery.
+
+HTTP delivery is **at least once**. A process can stop after the server accepts a message and before SQLite records success, so a later retry can send it again. Completed messages are removed from the outbox, and there is no permanent delivery audit log.
 
 ### Run locally
 
