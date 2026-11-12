@@ -21,6 +21,9 @@ public sealed class RegistryUpdateChecker(RegistryClient registry)
         ImageProvenance provenance = DockerImageIdentity.Provenance(reference, image);
         if (provenance.Kind == ImageProvenanceKind.BuildOnly)
             return new(UpdateStatus.Skipped, provenance.Reason);
+        if (provenance.Kind == ImageProvenanceKind.LocalOrImported)
+            return image?.Id == container.ImageId ? new(UpdateStatus.Skipped, provenance.Reason)
+                : new(UpdateStatus.Unknown, "Container and image identities disagree.");
         if (!RegistryClient.Supports(reference.Registry))
             return new(UpdateStatus.UnsupportedRegistry, "Only Docker Hub and GHCR are supported.");
         if (provenance.Kind is ImageProvenanceKind.Unknown or ImageProvenanceKind.Mixed)

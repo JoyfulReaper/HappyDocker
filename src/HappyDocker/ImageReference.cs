@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 
 namespace HappyDocker;
 
-public enum ImageReferenceKind { Missing, Invalid, LocalImageId, Ambiguous, RegistryBacked, LocallyBuilt }
+public enum ImageReferenceKind { Missing, Invalid, LocalImageId, Ambiguous, RegistryBacked, LocallyBuilt, LocalOrImported }
 
 /// <summary>A parsed configured reference. Normalization describes Docker naming rules, not provenance.</summary>
 public sealed record ImageReference(
@@ -100,6 +100,7 @@ public sealed record ImageReference(
             {
                 ImageProvenanceKind.Pulled => ImageReferenceKind.RegistryBacked,
                 ImageProvenanceKind.BuildOnly => ImageReferenceKind.LocallyBuilt,
+                ImageProvenanceKind.LocalOrImported => ImageReferenceKind.LocalOrImported,
                 _ => ImageReferenceKind.Ambiguous
             },
             Reason = provenance.Reason

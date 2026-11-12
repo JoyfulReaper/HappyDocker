@@ -68,10 +68,11 @@ public static class DockerVersions
             ImageProvenance provenance = DockerImageIdentity.Provenance(reference, image);
             if (provenance.Kind != ImageProvenanceKind.Pulled)
             {
-                if (provenance.Kind == ImageProvenanceKind.BuildOnly)
+                if (provenance.Kind is ImageProvenanceKind.BuildOnly or ImageProvenanceKind.LocalOrImported)
                     observations[observationIndex] = observations[observationIndex] with { Evidence = FindingEvidence.NotApplicable };
                 output.WriteLine(provenance.Kind == ImageProvenanceKind.BuildOnly
                     ? "  Skipped locally built image."
+                    : provenance.Kind == ImageProvenanceKind.LocalOrImported ? $"  Skipped. {provenance.Reason}"
                     : $"  Skipped ambiguous provenance. {provenance.Reason}");
                 continue;
             }
