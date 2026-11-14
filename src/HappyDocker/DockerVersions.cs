@@ -174,7 +174,8 @@ public static class DockerVersions
                     if (enumeration.CachedAt is not null)
                     {
                         output.WriteLine("  Cached absence is inconclusive; prior findings are retained until a fresh enumeration.");
-                        observations[observationIndex] = observations[observationIndex] with { Evidence = FindingEvidence.NotApplicable };
+                        observations[observationIndex] = observations[observationIndex] with
+                            { Evidence = FindingEvidence.NotApplicable, InconclusiveForSnapshot = true };
                     }
                     else if (enumeration.IncompleteReason is null && deployment is not null)
                         observations[observationIndex] = FindingObservation.ForContainer(container, reference,

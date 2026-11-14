@@ -9,6 +9,7 @@ public sealed record FindingObservation(
 {
     internal bool PlatformRequestFailed { get; init; }
     internal IReadOnlyCollection<string> FailedPlatformRequests { get; init; } = [];
+    internal bool InconclusiveForSnapshot { get; init; }
     public string? VerifiedAlternative { get; init; }
     public VersionUpgrade? Upgrade => Kind == FindingKind.VersionCandidate ? ImageVersion.Parse(ConfiguredTag)?.UpgradeTo(Available) : null;
     public VersionUpgrade? AlternativeUpgrade => Kind == FindingKind.VersionCandidate
@@ -36,6 +37,8 @@ public sealed record FindingObservation(
 
 public sealed record FindingRun(int InventoryExitCode, IReadOnlyList<FindingObservation> Observations)
 {
+    // Set only by the unified check after a complete inventory; diagnostics are not host snapshots.
+    public bool HasFullHostCoverage { get; internal init; }
     public int DeferredCount => Observations.Count(observation => observation.Evidence == FindingEvidence.Deferred);
 
     public int IncompleteCount => Observations.Count(observation => observation.IsIncomplete)

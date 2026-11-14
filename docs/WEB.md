@@ -4,7 +4,7 @@ HappyDocker.Web is a .NET 10 ASP.NET Core Razor Pages application for receiving
 agent snapshots and displaying known image updates. It runs independently of the
 CLI, requires no Docker installation or socket, and has no container management
 or command execution endpoints. DeepDish is the intended future host; this phase
-does not deploy there or implement reporting in the CLI.
+does not deploy there or implement HTTP reporting in the CLI.
 
 ## Projects and boundaries
 
@@ -236,13 +236,31 @@ client and temporary SQLite files. See Microsoft's
 
 ## Deferred work and architectural concerns
 
-Phase 2 must implement agent-side HTTP reporting and durable full-snapshot
-construction, including an honest definition of complete coverage across mutable
-tag checks and version discovery. CLI observations, history, diagnostics, and
-cached candidates cannot simply be serialized as new events or all relabeled
-complete. Preserve actual per-finding observation times and use immutable IDs and
-payloads for retries. Define retry/backoff and clock handling before operational
-multi-host synchronization.
+Phase 2A adds `AgentReportBuilder` to construct validated v1 snapshots from a
+unified `DockerCheck.RunObservedAsync` run and the transitions returned by
+`FindingHistory.Record` for that same run and explicit stable `--host`. It is a
+component only: no command sends or persists reports. It creates a new report ID
+per construction; a future sender must retain the exact ID and payload for retries.
+Caller-supplied `scannedAt` is the scan completion time, and finding observation
+times remain those of the underlying evidence. Optional configured image and
+platform text are omitted because finding history does not retain them.
+
+Only a successful unified host inventory with both finding kinds covered can be
+complete. Repository-only diagnostics, incomplete inventory, and cached absence
+are not authoritative; deferred and failed work retains its status. Incomplete
+reports contain only successfully observed active findings, never resolutions.
+Complete reports omit absent and removed findings so the server can resolve them.
+The builder rejects observations without matching history transitions, invalid
+contract fields, more than 1,000 findings, and JSON over 1 MiB rather than
+truncating. History may reject an older cached observation; in that case the
+caller must not send a report built from that run. The existing CLI history does
+not automatically resolve removed containers, although a complete web snapshot
+will do so on ingestion.
+
+Phase 2B must connect construction to an explicitly configured stable host and
+implement authenticated delivery, durable retry of immutable payloads, backoff,
+and clock handling before operational multi-host synchronization. No transmission
+or durable report queue is implemented here.
 
 Production deployment on DeepDish, WireGuard/firewall/reverse-proxy/browser-auth
 setup, scheduling/health/staleness policies, receipt/resolved-finding retention,

@@ -13,6 +13,41 @@ namespace HappyDocker.Web.Tests;
 public sealed class DashboardTests
 {
     [TestMethod]
+    public async Task ConstructedIncompleteSnapshotsPreserveServerFindingsUntilACompleteInventory()
+    {
+        using var factory = new DashboardFactory();
+        using var client = factory.AuthorizedClient();
+        var initial = DashboardFactory.Report();
+        using var first = await DashboardFactory.Post(client, initial);
+        Assert.AreEqual(HttpStatusCode.OK, first.StatusCode);
+        DateTimeOffset timestamp = initial.ScannedAt;
+        foreach (var evidence in new[] { FindingEvidence.Incomplete, FindingEvidence.Deferred })
+        {
+            timestamp = timestamp.AddMinutes(1);
+            var observation = new FindingObservation(FindingKind.VersionCandidate, "nats", "id", null,
+                "docker.io/library/nats", "2.14.8-alpine", null, null, null, evidence, timestamp);
+            var run = new FindingRun(0, [observation]);
+            var report = AgentReportBuilder.Build("host-a", run, [], timestamp);
+            Assert.IsNull(ReportValidation.Validate(report, DateTimeOffset.UtcNow));
+            using var response = await DashboardFactory.Post(client, report);
+            Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
+            Assert.AreNotEqual(FindingState.Resolved, factory.Host().Findings.Single().State);
+        }
+        timestamp = timestamp.AddMinutes(1);
+        var failed = AgentReportBuilder.Build("host-a", new FindingRun(1, []), [], timestamp);
+        using var failureResponse = await DashboardFactory.Post(client, failed);
+        Assert.AreEqual(HttpStatusCode.OK, failureResponse.StatusCode);
+        Assert.AreNotEqual(FindingState.Resolved, factory.Host().Findings.Single().State);
+
+        using var registry = new RegistryClient();
+        var empty = await DockerCheck.RunObservedAsync(_ => Task.FromResult(new DockerCommandResult(0, "", "")), registry, TextWriter.Null, TextWriter.Null);
+        var complete = AgentReportBuilder.Build("host-a", empty, [], timestamp.AddMinutes(1));
+        Assert.AreEqual(FindingRunStatus.Complete, complete.Status);
+        using var last = await DashboardFactory.Post(client, complete);
+        Assert.AreEqual(HttpStatusCode.OK, last.StatusCode);
+        Assert.AreEqual(FindingState.Resolved, factory.Host().Findings.Single().State);
+    }
+    [TestMethod]
     public async Task EmptyInstallationAndRegisteredHostHaveDifferentEmptyStates()
     {
         using var empty = new DashboardFactory { RegisterAgents = false };

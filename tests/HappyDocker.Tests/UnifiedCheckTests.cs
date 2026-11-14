@@ -9,6 +9,24 @@ namespace HappyDocker.Tests;
 [TestClass]
 public sealed class UnifiedCheckTests
 {
+    [TestMethod]
+    public async Task RealUnifiedCheckProducesValidatedSnapshotWithHistoryStates()
+    {
+        using var fixture = Fixture();
+        fixture.SetTag(fixture.NewManifest);
+        var result = await Run(fixture);
+        var transitions = FindingHistory.Record(Database, "host-1", result.Run.Observations);
+        var report = AgentReportBuilder.Build("host-1", result.Run, transitions, DateTimeOffset.UtcNow);
+        Assert.AreEqual(FindingRunStatus.Complete, report.Status);
+        Assert.HasCount(2, report.Findings);
+        Assert.IsNull(AgentReportValidation.Validate(report, DateTimeOffset.UtcNow));
+        Assert.IsTrue(report.Findings.All(finding => finding.State == FindingState.New));
+        Assert.IsTrue(report.Findings.All(finding => result.Run.Observations.Any(observation => observation.ObservedAt == finding.ObservedAt)));
+        var second = await Run(fixture);
+        var known = AgentReportBuilder.Build("host-1", second.Run,
+            FindingHistory.Record(Database, "host-1", second.Run.Observations), DateTimeOffset.UtcNow);
+        Assert.IsTrue(known.Findings.All(finding => finding.State == FindingState.Known));
+    }
     private const string Current = "2.14.8-alpine";
     private const string Candidate = "2.14.9-alpine";
     private const string Next = "2.14.10-alpine";
@@ -218,6 +236,8 @@ public sealed class UnifiedCheckTests
         var cached = await Run(fixture, cache: cache);
         Assert.AreEqual(FindingEvidence.NotApplicable, OfKind(cached.Run, FindingKind.VersionCandidate).Evidence);
         Assert.IsEmpty(FindingHistory.Record(Database, "clanker", cached.Run.Observations));
+        var cachedReport = AgentReportBuilder.Build("clanker", cached.Run, [], clock.GetUtcNow(), clock);
+        Assert.AreEqual(FindingRunStatus.Partial, cachedReport.Status);
         Assert.AreEqual("New", Scalar("SELECT state FROM findings"));
         clock.Advance(TimeSpan.FromHours(19));
         var refreshed = (await Run(fixture, cache: cache)).Run;

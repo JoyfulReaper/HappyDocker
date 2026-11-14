@@ -1,7 +1,10 @@
 namespace HappyDocker;
 
 public sealed record DockerCommandResult(int ExitCode, string Stdout, string Stderr);
-public sealed record DockerInventory(int ExitCode, List<DockerInspectRow> Containers, List<DockerImageRow> Images);
+public sealed record DockerInventory(int ExitCode, List<DockerInspectRow> Containers, List<DockerImageRow> Images)
+{
+    public bool CompleteContainerInventory { get; init; }
+}
 
 public static class DockerScan
 {
@@ -22,7 +25,7 @@ public static class DockerScan
         DockerCommandResult ps = await runDocker(["ps", "--format", "{{json .}}"]);
         if (ps.ExitCode != 0) { error.WriteLine(ps.Stderr); return new(ps.ExitCode, [], []); }
         var containers = DockerJsonLines.Parse<DockerPsRow>(ps.Stdout);
-        if (containers.Count == 0) return new(0, [], []);
+        if (containers.Count == 0) return new(0, [], []) { CompleteContainerInventory = true };
 
         const string inspectFormat =
             """{"Id":{{json .Id}},"Name":{{json .Name}},"ImageId":{{json .Image}},"ConfiguredImage":{{json .Config.Image}},"Platform":{{json .Platform}},"ImageManifestDescriptor":{{json (index . "ImageManifestDescriptor")}}}""";
@@ -39,7 +42,14 @@ public static class DockerScan
             : await runDocker(["image", "inspect", "--format", imageFormat, .. imageIds]);
         // Docker can return partial metadata when an image disappears during the scan.
         if (images.ExitCode != 0) error.WriteLine(images.Stderr);
-        return new(images.ExitCode, inspected, DockerJsonLines.Parse<DockerImageRow>(images.Stdout));
+        bool complete = containers.All(c => !string.IsNullOrWhiteSpace(c.ID))
+            && inspected.All(c => !string.IsNullOrWhiteSpace(c.Id))
+            && containers.Select(c => c.ID).Distinct(StringComparer.Ordinal).Count() == containers.Count
+            && inspected.Select(c => c.Id).Distinct(StringComparer.Ordinal).Count() == inspected.Count
+            && containers.Count == inspected.Count
+            && containers.All(c => inspected.Count(i => i.Id.StartsWith(c.ID, StringComparison.Ordinal)) == 1)
+            && inspected.All(i => containers.Count(c => i.Id.StartsWith(c.ID, StringComparison.Ordinal)) == 1);
+        return new(images.ExitCode, inspected, DockerJsonLines.Parse<DockerImageRow>(images.Stdout)) { CompleteContainerInventory = complete };
     }
 
     public static void WriteReport(IEnumerable<DockerInspectRow> containers, IEnumerable<DockerImageRow> images,

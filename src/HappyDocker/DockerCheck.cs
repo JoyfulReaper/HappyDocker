@@ -14,12 +14,13 @@ public static class DockerCheck
         DockerInventory inventory = await DockerScan.ReadAsync(runDocker, error);
         var checker = new RegistryUpdateChecker(registry, reuseResponses: true);
         FindingRun mutable = await ObserveInventoryAsync(inventory, checker, observedAt, output, error, cancellationToken);
-        if (inventory.Containers.Count == 0) return mutable;
+        if (inventory.Containers.Count == 0) return mutable with { HasFullHostCoverage = inventory.CompleteContainerInventory };
         output.WriteLine();
         output.WriteLine("Version discovery");
         FindingRun patches = await DockerVersions.ObserveInventoryAsync(inventory, registry, checker, null, observedAt,
             output, error, cancellationToken, discoveryCache, discoveryBudget);
-        return new(inventory.ExitCode, [.. mutable.Observations, .. patches.Observations]);
+        return new(inventory.ExitCode, [.. mutable.Observations, .. patches.Observations])
+            { HasFullHostCoverage = inventory.CompleteContainerInventory };
     }
 
     public static async Task<int> RunAsync(Func<string[], Task<DockerCommandResult>> runDocker,
