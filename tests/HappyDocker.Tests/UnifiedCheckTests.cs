@@ -254,9 +254,31 @@ public sealed class UnifiedCheckTests
         await Run(fixture, cache: cache);
         FindingHistory.Record(Database, "clanker", [PriorPatch(fixture, clock.GetUtcNow().AddHours(1)) with { Available = Next }]);
         clock.Advance(TimeSpan.FromHours(6));
-        FindingHistory.Record(Database, "clanker", (await Run(fixture, cache: cache)).Run.Observations);
+        var run = (await Run(fixture, cache: cache)).Run;
+        var transitions = FindingHistory.Record(Database, "clanker", run.Observations);
+        var report = AgentReportBuilder.Build("clanker", run, transitions, clock.GetUtcNow(), out int unmatched, clock);
+        Assert.AreEqual(1, unmatched);
+        Assert.AreEqual(FindingRunStatus.Partial, report.Status);
+        Assert.IsFalse(report.Findings.Any(item => item.Kind == FindingKind.VersionCandidate));
         Assert.AreEqual(Next, Scalar("SELECT available FROM findings"));
         Assert.AreEqual("New", Scalar("SELECT state FROM findings"));
+    }
+
+    [TestMethod]
+    public async Task RepeatedNormalCachedScansRemainReportable()
+    {
+        using var fixture = Fixture();
+        var cache = new VersionDiscoveryCache(Database);
+        for (int i = 0; i < 3; i++)
+        {
+            var run = (await Run(fixture, cache: cache)).Run;
+            var transitions = FindingHistory.Record(Database, "clanker", run.Observations);
+            var report = AgentReportBuilder.Build("clanker", run, transitions, DateTimeOffset.UtcNow, out int unmatched);
+            Assert.AreEqual(0, unmatched);
+            Assert.AreEqual(FindingRunStatus.Complete, report.Status);
+            Assert.AreEqual(i == 0 ? FindingState.New : FindingState.Known, report.Findings.Single().State);
+            Assert.AreEqual(OfKind(run, FindingKind.VersionCandidate).ObservedAt, report.Findings.Single().ObservedAt);
+        }
     }
 
     [TestMethod]
@@ -483,7 +505,7 @@ public sealed class UnifiedCheckTests
         Execute("DROP TABLE version_discovery_cache; PRAGMA user_version = 2");
         using var fixture = Fixture();
         await Run(fixture, cache: new VersionDiscoveryCache(Database));
-        Assert.AreEqual(4L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(5L, Scalar("PRAGMA user_version"));
         Assert.AreEqual("destination", Scalar("SELECT pending_notification_destination FROM findings WHERE kind = 'VersionCandidate'"));
         Assert.AreEqual("New", Scalar("SELECT pending_notification_state FROM findings WHERE kind = 'VersionCandidate'"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM notification_outbox"));

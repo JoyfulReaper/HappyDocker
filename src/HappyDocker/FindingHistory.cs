@@ -10,11 +10,12 @@ public sealed class FindingHistoryException(string message) : Exception(message)
 
 public static class FindingHistory
 {
-    private const int SchemaVersion = 4;
+    private const int SchemaVersion = 5;
     private const int ApplicationId = 0x48444648; // HDFH
 
     public static IReadOnlyList<FindingTransition> Record(string databasePath, string host, IEnumerable<FindingObservation> observations,
-        string? notificationDestinationKey = null)
+        string? notificationDestinationKey = null,
+        Action<SqliteConnection, SqliteTransaction, IReadOnlyList<FindingTransition>, IReadOnlyList<FindingObservation>>? afterRecord = null)
     {
         if (string.IsNullOrWhiteSpace(host))
             throw new FindingHistoryException("A stable host identifier is required for finding history.");
@@ -22,13 +23,15 @@ public static class FindingHistory
         {
             var transitions = new List<FindingTransition>();
             var notifications = new List<FindingTransition>();
+            var stale = new List<FindingObservation>();
             foreach (FindingObservation observation in observations)
             {
                 if (observation.Evidence is not (FindingEvidence.Present or FindingEvidence.Absent) || observation.Repository is null
                     || string.IsNullOrWhiteSpace(observation.ContainerName)) continue;
                 string timestamp = observation.ObservedAt.UtcDateTime.ToString("O", CultureInfo.InvariantCulture);
                 StoredFinding? previous = Read(connection, transaction, host, observation);
-                if (previous is not null && string.CompareOrdinal(timestamp, previous.LastObserved) < 0) continue;
+                if (previous is not null && string.CompareOrdinal(timestamp, previous.LastObserved) < 0)
+                { stale.Add(observation); continue; }
 
                 if (observation.Evidence == FindingEvidence.Absent)
                 {
@@ -100,6 +103,7 @@ public static class FindingHistory
             }
             if (notificationDestinationKey is not null)
                 NotificationOutbox.Enqueue(connection, transaction, host, notificationDestinationKey, notifications);
+            afterRecord?.Invoke(connection, transaction, transitions, stale);
             return transitions;
         });
     }
@@ -158,19 +162,23 @@ public static class FindingHistory
         command.Transaction = transaction;
         command.CommandText = "PRAGMA user_version";
         long version = (long)command.ExecuteScalar()!;
-        if (version is not (0 or 1 or 2 or 3 or SchemaVersion))
+        if (version is not (0 or 1 or 2 or 3 or 4 or SchemaVersion))
             throw new FindingHistoryException($"Unsupported finding history schema version {version}. Expected {SchemaVersion}.");
 
         command.CommandText = "PRAGMA application_id";
         long applicationId = (long)command.ExecuteScalar()!;
-        if (applicationId == ApplicationId && version is 1 or 2 or 3 or SchemaVersion)
+        if (applicationId == ApplicationId && version is 1 or 2 or 3 or 4 or SchemaVersion)
         {
             if (version == SchemaVersion) return;
-            if (version == 1) CreateOutbox(command);
-            EnsureNotificationEligibility(command);
-            if (version < 3) CreateDiscoveryCache(command);
-            EnsureDiscoveryAttempts(command);
-            MigrateVersionFindings(command);
+            if (version < 4)
+            {
+                if (version == 1) CreateOutbox(command);
+                EnsureNotificationEligibility(command);
+                if (version < 3) CreateDiscoveryCache(command);
+                EnsureDiscoveryAttempts(command);
+                MigrateVersionFindings(command);
+            }
+            CreateReportOutbox(command);
             return;
         }
         command.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'";
@@ -201,6 +209,22 @@ public static class FindingHistory
         EnsureNotificationEligibility(command);
         CreateDiscoveryCache(command);
         MigrateVersionFindings(command);
+        CreateReportOutbox(command);
+    }
+
+    private static void CreateReportOutbox(SqliteCommand command)
+    {
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS report_outbox (
+                id INTEGER PRIMARY KEY, host TEXT NOT NULL, destination_key TEXT NOT NULL,
+                payload BLOB NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt INTEGER NOT NULL DEFAULT 0, lease_token TEXT, lease_until INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS report_outbox_destination ON report_outbox(host, destination_key, id);
+            PRAGMA user_version = 5;
+            """;
+        command.ExecuteNonQuery();
     }
 
     private static void MigrateVersionFindings(SqliteCommand command)
@@ -228,7 +252,7 @@ public static class FindingHistory
             DROP TABLE findings;
             ALTER TABLE findings_v4 RENAME TO findings;
             UPDATE version_discovery_cache SET repository = 'docker.io/' || repository;
-            PRAGMA user_version = {SchemaVersion};
+            PRAGMA user_version = 4;
             """;
         command.ExecuteNonQuery();
     }

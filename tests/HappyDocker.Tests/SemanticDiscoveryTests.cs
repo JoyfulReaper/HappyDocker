@@ -263,7 +263,7 @@ public sealed class SemanticDiscoveryTests
         var known = CreateV3(notifier.DestinationKey);
         var transitions = FindingHistory.Record(Database, "clanker", [known], notifier.DestinationKey);
         Assert.AreEqual(FindingState.Known, transitions.Single().State);
-        Assert.AreEqual(4L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(5L, Scalar("PRAGMA user_version"));
         Assert.AreEqual(3L, Scalar("SELECT count(*) FROM findings WHERE kind = 'VersionCandidate'"));
         Assert.AreEqual(0L, Scalar("SELECT count(*) FROM findings WHERE state = 'Resolved' AND container_name != 'resolved'"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM notification_outbox"));
@@ -325,7 +325,7 @@ public sealed class SemanticDiscoveryTests
         Assert.AreEqual(8L, Scalar("SELECT attempts FROM notification_outbox"));
         Assert.AreEqual(10000003600L, Scalar("SELECT next_attempt FROM notification_outbox"));
         Assert.AreEqual(0L, Scalar("SELECT lease_until FROM notification_outbox"));
-        Assert.AreEqual(4L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(5L, Scalar("PRAGMA user_version"));
         Assert.AreEqual(3L, Scalar("SELECT count(*) FROM findings"));
     }
 

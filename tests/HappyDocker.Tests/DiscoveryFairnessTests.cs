@@ -169,7 +169,7 @@ public sealed class DiscoveryFairnessTests
         if (version == 1) Execute("DROP TABLE notification_outbox");
         Execute($"PRAGMA user_version = {version}");
         FindingHistory.Record(Database, "clanker", []);
-        Assert.AreEqual(4L, Scalar("PRAGMA user_version"));
+        Assert.AreEqual(5L, Scalar("PRAGMA user_version"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM findings WHERE state = 'New'"));
         Assert.AreEqual(version == 1 ? 0L : 1L, Scalar("SELECT count(*) FROM notification_outbox"));
         Assert.AreEqual(1L, Scalar("SELECT count(*) FROM pragma_table_info('version_discovery_cache') WHERE name = 'last_attempt'"));

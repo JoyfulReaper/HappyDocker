@@ -4,14 +4,14 @@ HappyDocker.Web is a .NET 10 ASP.NET Core Razor Pages application for receiving
 agent snapshots and displaying known image updates. It runs independently of the
 CLI, requires no Docker installation or socket, and has no container management
 or command execution endpoints. DeepDish is the intended future host; this phase
-does not deploy there or implement HTTP reporting in the CLI.
+does not deploy there. The CLI can optionally send reports to it.
 
 ## Projects and boundaries
 
 - `src/HappyDocker`: existing CLI, registry checks, scanner SQLite state, ntfy.
 - `src/HappyDocker.Contracts`: portable v1 report DTOs and JSON options, existing
   finding enums, and the existing stable-version parser/classifier. Sharing this
-  small library lets the future sender and web app use the same semantics without
+  small library lets the sender and web app use the same semantics without
   referencing the CLI executable or its Docker/registry/notification machinery.
   The parser and enums were extracted with no CLI command or database change.
 - `src/HappyDocker.Web`: authenticated ingestion, separate SQLite store, Razor
@@ -100,7 +100,7 @@ Finding fields:
 | Field | Meaning / limits |
 | --- | --- |
 | `kind` | Required `mutableTag` or `versionCandidate`. |
-| `containerName` | Required stable logical name, 1–256 characters. Strip Docker's leading `/` consistently in the future sender. |
+| `containerName` | Required stable logical name, 1–256 characters. Docker's leading `/` is stripped consistently. |
 | `repository` | Required registry-qualified repository, up to 255 characters; no tag, digest, credentials, URL scheme, or query. |
 | `containerId`, `imageId` | Optional deployment identities, up to 256 characters each; do not form the logical finding key. |
 | `configuredImage` | Optional original configured reference, up to 1,024 characters. Never send secrets embedded in references. |
@@ -234,13 +234,14 @@ The HTTP tests exercise the actual Razor and ingestion pipeline with a test
 client and temporary SQLite files. See Microsoft's
 [ASP.NET Core integration testing guidance](https://learn.microsoft.com/en-us/aspnet/core/test/integration-tests?view=aspnetcore-10.0).
 
-## Deferred work and architectural concerns
+## CLI reporting and delivery
 
 Phase 2A adds `AgentReportBuilder` to construct validated v1 snapshots from a
 unified `DockerCheck.RunObservedAsync` run and the transitions returned by
-`FindingHistory.Record` for that same run and explicit stable `--host`. It is a
-component only: no command sends or persists reports. It creates a new report ID
-per construction; a future sender must retain the exact ID and payload for retries.
+`FindingHistory.Record` for that same run and explicit stable `--host`. Each
+`check` with `--report-url` and `--report-token-file` queues its report together
+with history and ntfy changes in the scanner state database. The report ID,
+scan time, and serialized bytes are retained unchanged across delivery retries.
 Caller-supplied `scannedAt` is the scan completion time, and finding observation
 times remain those of the underlying evidence. Optional configured image and
 platform text are omitted because finding history does not retain them.
@@ -250,20 +251,56 @@ complete. Repository-only diagnostics, incomplete inventory, and cached absence
 are not authoritative; deferred and failed work retains its status. Incomplete
 reports contain only successfully observed active findings, never resolutions.
 Complete reports omit absent and removed findings so the server can resolve them.
-The builder rejects observations without matching history transitions, invalid
-contract fields, more than 1,000 findings, and JSON over 1 MiB rather than
-truncating. History may reject an older cached observation; in that case the
-caller must not send a report built from that run. The existing CLI history does
+The builder omits observations without matching history transitions and marks
+the report partial, with a CLI warning. This can happen when a cached candidate
+is older than a newer history observation; the dashboard retains its prior
+finding. The builder rejects invalid contract fields, more than 1,000 findings,
+and JSON over 1 MiB rather than truncating. The existing CLI history does
 not automatically resolve removed containers, although a complete web snapshot
 will do so on ingestion.
 
-Phase 2B must connect construction to an explicitly configured stable host and
-implement authenticated delivery, durable retry of immutable payloads, backoff,
-and clock handling before operational multi-host synchronization. No transmission
-or durable report queue is implemented here.
+For example, configure the registered host and token shown in the README's
+central reporting section. HTTPS URLs are accepted; HTTP requires an explicit
+RFC 1918, IPv6 unique-local, or loopback IP and prints a warning. Do not use HTTP
+unless the network itself protects the token and data. URLs must target
+`/api/agents/reports` and contain no credentials, query, or fragment. Redirects
+and proxies are disabled. Token files are read before scanning, accept 32–256
+printable non-space ASCII characters plus trailing newlines, and must have no
+group or other permission bits on Linux. Protect the parent directory and use
+appropriate ACLs on Windows. No tokens, URLs, or headers are stored in the queue.
+
+The v4 scanner database migrates transactionally to v5 by adding a separate
+report outbox; existing history, discovery cache, and ntfy entries remain intact.
+The outbox stores up to 100 reports across the database. It does not discard older
+pending reports to make room. If full, the new report is not queued, the operator
+is told, and a later scan must produce a replacement after space becomes available.
+Keep the same database, host, and URL to drain a queue; changing host or URL leaves
+old entries in place and they still count against the limit. Protect and back up
+the state database as it contains report payloads.
+
+Each invocation sends at most ten reports with a 30-second total delivery budget,
+10-second requests, 4 KiB response limit, FIFO ordering, and 60-second SQLite
+leases. Expired leases are retried. Transient failures back off from 30 seconds
+exponentially to one hour; a longer `Retry-After` is honored. Permanent HTTP errors
+remain queued, are shown to the operator, and retry no more than once per day
+unless `Retry-After` is longer. Correct the server, credential, or configuration
+and continue using the same host and URL; a permanent payload error may require
+operator intervention on the state database. Pending entries block later reports
+for that host and destination. `accepted`, `duplicate`, and `older` acknowledgments
+remove the entry; `older` is counted separately because the server already has a
+newer snapshot. A lost acknowledgment is safe to retry with identical bytes.
+
+The summary shows sent, failed, pending, and the next retry. Exit code `5` means
+report delivery remains pending or report construction/enqueueing failed, when
+the scan and ntfy would otherwise return `0`. Docker inventory, scan, and ntfy
+failure exit codes retain their existing precedence. Schedules must continue to
+invoke `check` for retries; there is no independent background sender. Synchronize
+clocks: the server validates timestamps and orders reports by scan time.
+
+## Deferred work and architectural concerns
 
 Production deployment on DeepDish, WireGuard/firewall/reverse-proxy/browser-auth
 setup, scheduling/health/staleness policies, receipt/resolved-finding retention,
 advanced dashboard features, and actual vulnerability scanning remain planned.
-The Phase 1 ingestion protocol accepts independently authenticated hosts; this
-does not mean operational multi-host reporting or synchronization is complete.
+The ingestion protocol accepts independently authenticated hosts; production
+deployment and operational scheduling are still separate work.

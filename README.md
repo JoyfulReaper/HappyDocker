@@ -28,6 +28,7 @@ Implemented:
 - `versions --repo` provides optional version-discovery diagnostics for selected Docker Hub and GHCR repositories.
 - `check` and `versions` can record finding history in an opt-in local SQLite database.
 - State-enabled commands can send explicitly configured ntfy alerts through a transactional notification outbox.
+- State-enabled `check` can send authenticated snapshots to HappyDocker.Web through a separate durable report outbox.
 - Registry tests use mocked HTTP responses, including authentication, redirects, rate limits, timeouts, multi-architecture indexes, unchanged NATS version tags, both Docker image stores, synthetic local repository digests, and incomplete or inconsistent metadata. Clanker's pulled NATS and build-only HappyQOTD identity examples are regression fixtures.
 
 Vulnerability scanning, scheduling, and automatic updates remain planned.
@@ -53,9 +54,8 @@ By default it binds only to localhost and accepts no agent reports until unique
 per-host tokens are configured. **Browser authentication is not implemented.**
 Production requires private-network restrictions and separate browser access
 authentication. The intended DeepDish/WireGuard deployment is not implemented.
-The CLI does not send HTTP reports yet, and operational multi-host synchronization
-and vulnerability scanning remain planned. Existing CLI commands and scanner
-database schemas are unchanged.
+The CLI can optionally send authenticated reports; production deployment,
+scheduling, and vulnerability scanning remain planned.
 
 See [web dashboard setup and report contract](docs/WEB.md) for authentication,
 sample ingestion, validation and retry behavior, conservative incomplete-scan
@@ -169,7 +169,21 @@ Each enabled invocation attempts at most ten messages within a 30-second deliver
 
 The notification summary reports sent, failed, and pending counts separately. Exit code `3` indicates notification failure or remaining pending work, including delayed retries and batches exceeding the delivery limit. This takes precedence over the finding outcome, while a nonzero Docker inventory exit code is retained. Pending alerts are retried even when the enabled command observes no new findings. Use another invocation after the retry deadline to continue delivery.
 
-HTTP delivery is **at least once**. A process can stop after the server accepts a message and before SQLite records success, so a later retry can send it again. Completed messages are removed from the outbox, and there is no permanent delivery audit log.
+ntfy delivery is **at least once**. A process can stop after the server accepts a message and before SQLite records success, so a later retry can send it again. Completed messages are removed from the outbox, and there is no permanent delivery audit log.
+
+### Send central reports
+
+Register the same host ID and a separate agent token in HappyDocker.Web, then place the token in a private file. On Linux use mode `0600` and a private parent directory. Configure a scheduled check, for example:
+
+```sh
+happydocker check --state /var/lib/happydocker/findings.db --host clanker \
+  --report-url http://10.99.0.16:5080/api/agents/reports \
+  --report-token-file /etc/happydocker/report-token
+```
+
+The address is an example for a future private WireGuard network, not a deployed server. HTTPS is supported; HTTP is restricted to explicit private or loopback IP addresses and prints a warning because the bearer token and report are unencrypted. The token must not be supplied as a command argument. Reporting requires `--state`, an explicit stable `--host`, and both reporting options; configuration and token permissions are checked before scanning. Reporting is available for `check` only.
+
+Each report is queued with its original serialized payload and ID in the state database before delivery. Subsequent invocations retry pending reports in order, including after a restart. Accepted, duplicate, and older acknowledgments remove the entry. The queue is limited to 100 reports across the database; when full, the new report is rejected visibly and existing reports are kept. Keep using the same host and URL to drain its queue. Delivery failures and pending reports cause exit code `5` when the scan and ntfy delivery would otherwise exit `0`; existing inventory, scan, and ntfy failure codes take precedence. See [central reporting](docs/WEB.md#cli-reporting-and-delivery) for retry, recovery, and security details.
 
 ### Run locally
 
@@ -265,7 +279,7 @@ See [the project plan](docs/PLAN.md) for scope, milestones, design constraints, 
 ## Initial technology choices
 
 - **Runtime:** C# / .NET 10
-- **Interface:** Local read-only console report plus Phase 1 Razor Pages dashboard; CLI JSON/HTTP reporting planned
+- **Interface:** Local read-only console report plus Razor Pages dashboard and optional CLI HTTP reporting
 - **State:** Opt-in local CLI SQLite finding history plus a separate web-owned SQLite database
 - **Notifications:** ntfy
 - **Security scanning:** Existing scanner (Trivy or equivalent), with exact digest/version reported

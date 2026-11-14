@@ -89,7 +89,9 @@ public sealed class AgentReportBuilderTests
     {
         var item = Finding();
         Assert.ThrowsExactly<ArgumentException>(() => AgentReportBuilder.Build("docker:implicit", new(0, []), [], now));
-        Assert.ThrowsExactly<InvalidOperationException>(() => Build(new FindingRun(0, [item]) { HasFullHostCoverage = true }));
+        var unmatched = AgentReportBuilder.Build("host", new FindingRun(0, [item]) { HasFullHostCoverage = true }, [], now, out int skipped);
+        Assert.AreEqual(1, skipped);
+        Assert.AreEqual(FindingRunStatus.Partial, unmatched.Status);
         var invalid = item with { Available = "not-a-digest" };
         Assert.ThrowsExactly<InvalidOperationException>(() => Build(new FindingRun(0, [invalid]), Transition(invalid)));
         var many = Enumerable.Range(0, 1001).Select(i => Finding($"container-{i}")).ToArray();

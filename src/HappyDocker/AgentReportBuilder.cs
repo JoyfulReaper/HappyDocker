@@ -6,7 +6,10 @@ namespace HappyDocker;
 public static class AgentReportBuilder
 {
     public static AgentReport Build(string hostId, FindingRun run, IReadOnlyList<FindingTransition> transitions,
-        DateTimeOffset scannedAt, TimeProvider? clock = null)
+        DateTimeOffset scannedAt, TimeProvider? clock = null) => Build(hostId, run, transitions, scannedAt, out _, clock);
+
+    public static AgentReport Build(string hostId, FindingRun run, IReadOnlyList<FindingTransition> transitions,
+        DateTimeOffset scannedAt, out int unmatchedObservations, TimeProvider? clock = null)
     {
         ArgumentNullException.ThrowIfNull(run);
         ArgumentNullException.ThrowIfNull(transitions);
@@ -19,6 +22,7 @@ public static class AgentReportBuilder
             status = FindingRunStatus.Partial;
 
         var findings = new List<ReportFinding>();
+        unmatchedObservations = 0;
         if (status != FindingRunStatus.Failed)
         {
             foreach (FindingObservation observation in run.Observations.Where(item => item.Evidence == FindingEvidence.Present))
@@ -28,7 +32,11 @@ public static class AgentReportBuilder
                     && transition.State is FindingState.New or FindingState.Known or FindingState.Changed).ToArray();
                 if (matches.Length != 1 || observation.Repository is null || observation.Available is null
                     || observation.PlatformVerified is null)
-                    throw new InvalidOperationException("A present observation has no matching active history transition.");
+                {
+                    unmatchedObservations++;
+                    if (status == FindingRunStatus.Complete) status = FindingRunStatus.Partial;
+                    continue;
+                }
                 findings.Add(new ReportFinding
                 {
                     Kind = observation.Kind, ContainerName = observation.ContainerName,

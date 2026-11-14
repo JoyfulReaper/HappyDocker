@@ -10,7 +10,8 @@ if (args.Length == 0 || args[0] is not ("scan" or "check" or "versions") || (arg
 }
 
 if (!FindingStateOptions.TryParse(args[1..], out FindingStateOptions options)
-    || (args[0] == "check" && options.CommandArguments.Length != 0))
+    || (args[0] == "check" && options.CommandArguments.Length != 0)
+    || (args[0] != "check" && options.ReportUrl is not null))
 {
     WriteUsage();
     return 1;
@@ -20,6 +21,9 @@ try
 {
     if (args[0] == "scan")
         return await DockerScan.RunAsync(arguments => RunDockerAsync(arguments), Console.Out, Console.Error);
+    using AgentReportClient? reporter = options.ReportUrl is null ? null : new(options.ReportUrl, options.ReportTokenFile!);
+    if (reporter?.UsesInsecureHttp == true)
+        Console.Error.WriteLine("Warning: report authentication and data use unencrypted HTTP; use only on a trusted private network such as WireGuard.");
     GhcrCredentials? credentials = GhcrCredentials.Load(
         Environment.GetEnvironmentVariable(GhcrCredentials.UsernameVariable),
         Environment.GetEnvironmentVariable(GhcrCredentials.TokenFileVariable),
@@ -36,7 +40,7 @@ try
         return await DockerCheck.RunAsync(RunDockerAsync, registry, Console.Out, Console.Error);
     FindingRun check = await DockerCheck.RunObservedAsync(RunDockerAsync, registry, Console.Out, Console.Error,
         discoveryCache: new VersionDiscoveryCache(options.DatabasePath));
-    return await options.RecordAsync(check, RunDockerAsync, Console.Out);
+    return await options.RecordAsync(check, RunDockerAsync, Console.Out, reporter: reporter);
 }
 catch (FindingHistoryException exception)
 {
@@ -44,6 +48,11 @@ catch (FindingHistoryException exception)
     return 1;
 }
 catch (GhcrConfigurationException exception)
+{
+    Console.Error.WriteLine(exception.Message);
+    return 1;
+}
+catch (ReportConfigurationException exception)
 {
     Console.Error.WriteLine(exception.Message);
     return 1;
@@ -62,7 +71,7 @@ catch (Win32Exception exception)
 static void WriteUsage()
 {
     Console.Error.WriteLine("Usage: happydocker scan");
-    Console.Error.WriteLine("       happydocker check [--state <database-path> [--host <id>] [--notify-ntfy <topic-url>]]");
+    Console.Error.WriteLine("       happydocker check [--state <database-path> [--host <id>] [--notify-ntfy <topic-url>] [--report-url <url> --report-token-file <path>]]");
     Console.Error.WriteLine("       happydocker versions --repo <repository> [--repo <repository> ...] [--state <database-path> [--host <id>] [--notify-ntfy <topic-url>]]");
 }
 

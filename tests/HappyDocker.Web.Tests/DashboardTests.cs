@@ -13,6 +13,36 @@ namespace HappyDocker.Web.Tests;
 public sealed class DashboardTests
 {
     [TestMethod]
+    public async Task CliReportClientDeliversToTheRealIngestionEndpoint()
+    {
+        using var factory = new DashboardFactory();
+        using var server = factory.CreateClient();
+        Directory.CreateDirectory(factory.DirectoryPath);
+        string tokenPath = Path.Combine(factory.DirectoryPath, "agent-token");
+        File.WriteAllText(tokenPath, factory.TokenA);
+        if (OperatingSystem.IsLinux()) File.SetUnixFileMode(tokenPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        using var reporter = new AgentReportClient("https://example.test/api/agents/reports", tokenPath, new IngestionHandler(server));
+        using var registry = new RegistryClient();
+        var run = await DockerCheck.RunObservedAsync(_ => Task.FromResult(new DockerCommandResult(0, "", "")), registry, TextWriter.Null, TextWriter.Null);
+        var options = new FindingStateOptions([], Path.Combine(factory.DirectoryPath, "scanner.db"), "host-a",
+            ReportUrl: "https://example.test/api/agents/reports", ReportTokenFile: tokenPath);
+        Assert.AreEqual(0, await options.RecordAsync(run, _ => throw new AssertFailedException(), TextWriter.Null, reporter: reporter));
+        Assert.AreEqual(FindingRunStatus.Complete, factory.Host().LatestReport!.Status);
+        Assert.IsEmpty(factory.Host().Findings);
+    }
+
+    private sealed class IngestionHandler(HttpClient server) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            using var forwarded = new HttpRequestMessage(HttpMethod.Post, "/api/agents/reports");
+            forwarded.Headers.Authorization = request.Headers.Authorization;
+            forwarded.Content = new ByteArrayContent(await request.Content!.ReadAsByteArrayAsync(cancellationToken));
+            forwarded.Content.Headers.ContentType = request.Content.Headers.ContentType;
+            return await server.SendAsync(forwarded, cancellationToken);
+        }
+    }
+    [TestMethod]
     public async Task ConstructedIncompleteSnapshotsPreserveServerFindingsUntilACompleteInventory()
     {
         using var factory = new DashboardFactory();
