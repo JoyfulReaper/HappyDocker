@@ -1,6 +1,7 @@
 using System.Text.Json;
 using HappyDocker;
 using HappyDocker.Web;
+using HappyDocker.Web.Advisories;
 using Microsoft.Data.Sqlite;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -8,6 +9,16 @@ builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 
 builder.Services.AddRazorPages();
 builder.Services.AddSingleton<AgentAuthentication>();
 builder.Services.AddSingleton<ReportStore>();
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddHttpClient(AdvisoryService.ClientName, client => client.Timeout = TimeSpan.FromSeconds(10))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+    {
+        AllowAutoRedirect = false,
+        UseCookies = false,
+        AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate | System.Net.DecompressionMethods.Brotli
+    });
+builder.Services.AddSingleton<AdvisoryService>();
+builder.Services.AddHostedService<AdvisoryRefreshWorker>();
 var app = builder.Build();
 // Validate configuration and database ownership before accepting traffic.
 _ = app.Services.GetRequiredService<AgentAuthentication>();

@@ -62,6 +62,21 @@ Remaining milestone work:
 
 ## Milestone 3 — vulnerabilities (new task to add to WSIWOT)
 
+**General advisory page implemented separately:** HappyDocker.Web now exposes
+`/security/advisories` with CISA KEV and GitHub-reviewed High/Critical advisories,
+background hourly refresh, bounded in-memory caching, source-aware CVE merging,
+search and severity/source/date filters, stale/outage states, and encoded plain
+text display. The page is security news; it does not match advisories to Docker
+containers, images, installed packages, or VPS infrastructure and does not mark
+this vulnerability-scanning milestone complete. CISA Known Exploited status is
+independent of severity; only GitHub-reported severity is used. No NVD integration
+or new CVE database was added. See [advisory details and limits](ADVISORIES.md).
+
+Remaining advisory follow-up, if operational needs justify it: persistent cache
+across restarts, coordination across web instances, and broader browsing beyond
+the current bounded 90-day cache. Actual image vulnerability scanning below
+remains planned.
+
 - Integrate Trivy or another maintained scanner as a replaceable adapter; don't build our own CVE database.
 - Scan the **specific deployed image digest**, and record scanner database timestamp, distribution, package/fixed versions, advisory ID, and source.
 - Handle images that lack standard OS packages and distroless or scratch images.

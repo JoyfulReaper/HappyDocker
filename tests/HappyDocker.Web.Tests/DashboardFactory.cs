@@ -7,6 +7,8 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using HappyDocker.Web.Advisories;
 
 [assembly: Parallelize(Scope = ExecutionScope.MethodLevel)]
 
@@ -20,12 +22,24 @@ internal sealed class DashboardFactory : WebApplicationFactory<Program>
     public string TokenB { get; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     public bool RegisterAgents { get; init; } = true;
     public Dictionary<string, string?> Overrides { get; } = [];
+    public AdvisoryService? AdvisoryCache { get; init; }
     public static System.Text.Json.JsonSerializerOptions Json => ReportJson.CreateOptions();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
         builder.UseContentRoot(Path.GetFullPath("../../../../../src/HappyDocker.Web", AppContext.BaseDirectory));
+        builder.ConfigureServices(services =>
+        {
+            // Existing and advisory HTTP tests never call live feeds.
+            foreach (var worker in services.Where(service => service.ImplementationType == typeof(AdvisoryRefreshWorker)).ToArray())
+                services.Remove(worker);
+            if (AdvisoryCache is not null)
+            {
+                services.RemoveAll<AdvisoryService>();
+                services.AddSingleton(AdvisoryCache);
+            }
+        });
         builder.ConfigureAppConfiguration((_, configuration) =>
         {
             var settings = new Dictionary<string, string?> { ["Web:DatabasePath"] = DatabasePath };

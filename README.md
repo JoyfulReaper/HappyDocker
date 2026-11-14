@@ -61,6 +61,23 @@ See [web dashboard setup and report contract](docs/WEB.md) for authentication,
 sample ingestion, validation and retry behavior, conservative incomplete-scan
 handling, storage details, security boundaries, and Phase 2 work.
 
+### Security advisories
+
+The web dashboard also provides `/security/advisories`: a read-only general
+advisory page using CISA Known Exploited Vulnerabilities (with its official GitHub
+mirror as a fallback) and GitHub-reviewed High/Critical advisories. Search and
+severity/source/date filters operate on an hourly background cache. The page
+shows source attribution, refresh times, stale/outage notices, and up to 100
+matching recent entries. Shared CVE identifiers are deduplicated. CISA exploitation
+status is separate from severity; no CVSS scores are invented.
+
+**These advisories are not matched to your containers or VPS infrastructure and
+do not establish that your systems are affected.** Vulnerability scanning remains
+planned. The page needs no new credentials and changes no CLI, agent-reporting,
+or database behavior. Its memory cache resets on restart; results cover a bounded
+90-day window rather than a complete catalog. See [advisory sources, limits,
+filtering, and security](docs/ADVISORIES.md).
+
 ### Normal monitoring
 
 Use one command for mutable-tag checks, automatic version discovery, state tracking, and optional ntfy delivery.
