@@ -1,8 +1,6 @@
 namespace HappyDocker;
 
-public enum FindingKind { MutableTag, VersionCandidate }
 public enum FindingEvidence { Present, Absent, Incomplete, NotApplicable, Deferred }
-public enum FindingRunStatus { Complete, Partial, Failed, Deferred }
 
 public sealed record FindingObservation(
     FindingKind Kind, string ContainerName, string ContainerId, string? ImageId, string? Repository,

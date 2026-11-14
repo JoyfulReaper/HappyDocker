@@ -1,8 +1,11 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/HappyDocker.Contracts/HappyDocker.Contracts.csproj" />
+    <Project Path="src/HappyDocker.Web/HappyDocker.Web.csproj" />
     <Project Path="src/HappyDocker/HappyDocker.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/HappyDocker.Web.Tests/HappyDocker.Web.Tests.csproj" />
     <Project Path="tests/HappyDocker.Tests/HappyDocker.Tests.csproj" />
   </Folder>
 </Solution>

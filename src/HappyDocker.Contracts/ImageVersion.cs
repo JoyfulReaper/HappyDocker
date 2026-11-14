@@ -16,7 +16,8 @@ internal sealed record ImageVersion(int Major, int Minor, int Patch, string Vari
 
     internal static ImageVersion? Parse(string? tag)
     {
-        if (tag is null || !ImageReference.IsValidTag(tag)) return null;
+        if (tag is null || !Regex.IsMatch(tag, @"\A[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}\z",
+            RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)) return null;
         Match match = Pattern.Match(tag);
         if (!match.Success || !ParseNumber(match.Groups[1].Value, out int major)
             || !ParseNumber(match.Groups[2].Value, out int minor)

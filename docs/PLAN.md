@@ -92,6 +92,33 @@ Remaining milestone work:
 
 ## Milestone 5 — deployment (WSIWOT #280 and optionally #279)
 
+### Central web dashboard — Phase 1 implemented
+
+The separate `HappyDocker.Web` .NET 10 Razor Pages application accepts versioned
+full-host snapshots at `POST /api/agents/reports` using unique configured per-host
+bearer tokens. A small `HappyDocker.Contracts` library shares report DTOs and
+existing finding/version semantics without pulling Docker code into the web app.
+The web-owned SQLite database stores latest host reports, known findings, and
+compact idempotency receipts; it never shares the scanner database. Complete
+snapshots can resolve omissions. Partial, failed, and deferred scans preserve
+previously outstanding findings; older reports and observations cannot overwrite
+newer state. Tests use temporary databases and HTTP test clients.
+
+The dark, responsive dashboard shows host status, timestamps, update candidates,
+Major/Minor/Patch classifications, finding state, and verified/unverified platform
+evidence. It has no Docker access or container controls. Local development binds
+only to localhost. See [the web contract and setup guide](WEB.md).
+
+**Remaining Phase 2 work:** agent-side HTTP reporting and durable full snapshot
+construction, retries/clock/coverage policies, operational multi-host
+synchronization, and production deployment on DeepDish over private WireGuard.
+Production needs private-network restrictions and separate browser authentication;
+browser authentication is not part of Phase 1. Receipt/resolved-finding retention,
+advanced filtering/sorting, and temporary maintenance checkboxes remain deferred.
+Vulnerability scanning is still planned independently.
+
+### Remaining deployment work
+
 - Add a configurable scan interval, log output, health/status, and clean shutdown.
 - Evaluate a constrained Docker socket proxy or host-agent pattern before running unattended; a Docker socket mounted `:ro` still exposes privileged API operations unless requests are restricted.
 - Start with one host; later use a separate local agent per host and central aggregation only if necessary.
@@ -103,7 +130,7 @@ Remaining milestone work:
 - Watchtower-style automatic updates
 - Managing all Docker hosts from an exposed unrestricted remote Docker socket
 - CVE exploit development or proving runtime exploitability automatically
-- An elaborate web dashboard, public API, or multi-user authentication system
+- An elaborate web dashboard, public API, or multi-user authentication system (the minimal private Phase 1 dashboard and agent-only ingestion API are implemented)
 - Replacing Docker Compose, registry scanners, or existing monitoring
 
 ## Architecture sketch (provisional)
@@ -120,6 +147,13 @@ Local CLI / scheduled worker
         +--> SQLite state and event deduplication
         |
         +--> Console / ntfy output
+
+Future agent HTTP sender (not implemented)
+        |
+        +--> Private WireGuard network --> HappyDocker.Web (Phase 1 receiver)
+                                           |
+                                           +--> Separate web SQLite
+                                           +--> Razor Pages dashboard
 ```
 
 Interfaces should be testable independently. Early development uses mocked registry responses to avoid rate limits and flaky network-based tests.

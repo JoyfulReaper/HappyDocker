@@ -4,8 +4,6 @@ using Microsoft.Data.Sqlite;
 
 namespace HappyDocker;
 
-public enum FindingState { New, Known, Changed, Resolved }
-
 public sealed record FindingTransition(FindingObservation Observation, FindingState State);
 
 public sealed class FindingHistoryException(string message) : Exception(message);

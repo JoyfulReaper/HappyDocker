@@ -32,6 +32,35 @@ Implemented:
 
 Vulnerability scanning, scheduling, and automatic updates remain planned.
 
+### Central web dashboard — Phase 1
+
+`src/HappyDocker.Web` is a .NET 10 Razor Pages dashboard with a responsive dark
+theme, authenticated `POST /api/agents/reports`, and its own SQLite database.
+It displays registered/reporting hosts, scan status and timestamps, outstanding
+image updates, upgrade classifications, and platform verification. It requires
+no Docker access and cannot control containers. `src/HappyDocker.Contracts`
+shares the versioned wire DTOs and existing finding/version semantics between
+the CLI and web app without coupling the web app to Docker code.
+
+For a local empty dashboard:
+
+```sh
+dotnet run --project src/HappyDocker.Web --no-launch-profile
+# http://localhost:5080
+```
+
+By default it binds only to localhost and accepts no agent reports until unique
+per-host tokens are configured. **Browser authentication is not implemented.**
+Production requires private-network restrictions and separate browser access
+authentication. The intended DeepDish/WireGuard deployment is not implemented.
+The CLI does not send HTTP reports yet, and operational multi-host synchronization
+and vulnerability scanning remain planned. Existing CLI commands and scanner
+database schemas are unchanged.
+
+See [web dashboard setup and report contract](docs/WEB.md) for authentication,
+sample ingestion, validation and retry behavior, conservative incomplete-scan
+handling, storage details, security boundaries, and Phase 2 work.
+
 ### Normal monitoring
 
 Use one command for mutable-tag checks, automatic version discovery, state tracking, and optional ntfy delivery.
@@ -219,8 +248,8 @@ See [the project plan](docs/PLAN.md) for scope, milestones, design constraints, 
 ## Initial technology choices
 
 - **Runtime:** C# / .NET 10
-- **Interface:** Local read-only console report; JSON output planned
-- **State:** Opt-in local SQLite finding history for `check` and `versions`
+- **Interface:** Local read-only console report plus Phase 1 Razor Pages dashboard; CLI JSON/HTTP reporting planned
+- **State:** Opt-in local CLI SQLite finding history plus a separate web-owned SQLite database
 - **Notifications:** ntfy
 - **Security scanning:** Existing scanner (Trivy or equivalent), with exact digest/version reported
 - **Registries:** Docker Hub and GitHub Container Registry (GHCR) first
