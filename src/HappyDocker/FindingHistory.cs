@@ -10,8 +10,8 @@ public sealed class FindingHistoryException(string message) : Exception(message)
 
 public static class FindingHistory
 {
-    private const int SchemaVersion = 5;
-    private const int ApplicationId = 0x48444648; // HDFH
+    internal const int SchemaVersion = 5;
+    internal const int ApplicationId = 0x48444648; // HDFH
 
     public static IReadOnlyList<FindingTransition> Record(string databasePath, string host, IEnumerable<FindingObservation> observations,
         string? notificationDestinationKey = null,

@@ -185,6 +185,16 @@ The address is an example for a future private WireGuard network, not a deployed
 
 Each report is queued with its original serialized payload and ID in the state database before delivery. Subsequent invocations retry pending reports in order, including after a restart. Accepted, duplicate, and older acknowledgments remove the entry. The queue is limited to 100 reports across the database; when full, the new report is rejected visibly and existing reports are kept. Keep using the same host and URL to drain its queue. Delivery failures and pending reports cause exit code `5` when the scan and ntfy delivery would otherwise exit `0`; existing inventory, scan, and ntfy failure codes take precedence. See [central reporting](docs/WEB.md#cli-reporting-and-delivery) for retry, recovery, and security details.
 
+Inspect and recover queued reports using their complete IDs from status:
+
+```sh
+happydocker reports status --state /var/lib/happydocker/findings.db
+happydocker reports retry --state /var/lib/happydocker/findings.db --id <report-id>
+happydocker reports discard --state /var/lib/happydocker/findings.db --id <report-id> --confirm
+```
+
+Status is read-only and shows host, destination identifier, attempts, retry time, lease, and last error without exposing credentials or payloads. After fixing a problem such as an expired credential, `retry` makes that report eligible for the next configured check; it does not send it immediately. Discarding an undelivered report may lose observations. Neither action can change an actively leased report.
+
 ### Run locally
 
 Install the .NET 10 SDK and Docker CLI, and ensure the local Docker daemon is accessible:

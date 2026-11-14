@@ -297,6 +297,27 @@ failure exit codes retain their existing precedence. Schedules must continue to
 invoke `check` for retries; there is no independent background sender. Synchronize
 clocks: the server validates timestamps and orders reports by scan time.
 
+### Inspect and recover the report queue
+
+Use `happydocker reports status --state <database>` to list report IDs, host IDs,
+destination hashes, attempts, next retry, lease status, and the last error. The
+command opens an existing v5 state database read-only; it does not create or
+migrate one, send reports, or print payloads or credentials. The destination is
+the hash of the configured URL, not the URL itself.
+
+After repairing a credential or endpoint, run `happydocker reports retry --state
+<database> --id <report-id>` to reset that report's retry deadline. A later
+`check` using the same host and URL attempts delivery in queue order; retry does
+not send a request or modify the report ID, serialized payload, attempt count,
+or last error. Earlier queued reports can still block it. To remove an undelivered
+report, use `happydocker reports discard --state <database> --id <report-id>
+--confirm`. **Discarding may lose observations.** Both commands require the full
+hyphenated report UUID, reject IDs that match more than one queue entry across
+hosts or destinations, and refuse active leases; expired leases can be recovered.
+They affect only the selected entry, leave ntfy untouched, and do not perform a
+database migration. Permanent failures are retained until successfully delivered
+or explicitly discarded.
+
 ## Deferred work and architectural concerns
 
 Production deployment on DeepDish, WireGuard/firewall/reverse-proxy/browser-auth

@@ -3,6 +3,9 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 
+if (args.Length > 0 && args[0] == "reports")
+    return ReportCommands.Run(args[1..], Console.Out, Console.Error);
+
 if (args.Length == 0 || args[0] is not ("scan" or "check" or "versions") || (args[0] == "scan" && args.Length != 1))
 {
     WriteUsage();
@@ -73,6 +76,9 @@ static void WriteUsage()
     Console.Error.WriteLine("Usage: happydocker scan");
     Console.Error.WriteLine("       happydocker check [--state <database-path> [--host <id>] [--notify-ntfy <topic-url>] [--report-url <url> --report-token-file <path>]]");
     Console.Error.WriteLine("       happydocker versions --repo <repository> [--repo <repository> ...] [--state <database-path> [--host <id>] [--notify-ntfy <topic-url>]]");
+    Console.Error.WriteLine("       happydocker reports status --state <database-path>");
+    Console.Error.WriteLine("       happydocker reports retry --state <database-path> --id <report-id>");
+    Console.Error.WriteLine("       happydocker reports discard --state <database-path> --id <report-id> --confirm");
 }
 
 static async Task<DockerCommandResult> RunDockerAsync(params string[] arguments)
