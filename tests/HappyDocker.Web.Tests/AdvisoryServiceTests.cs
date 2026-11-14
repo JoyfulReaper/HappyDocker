@@ -3,12 +3,94 @@ using System.Net.Http.Headers;
 using System.Text;
 using HappyDocker.Web.Advisories;
 using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Extensions.Logging;
+using System.Text.Json.Nodes;
 
 namespace HappyDocker.Web.Tests;
 
 [TestClass]
 public sealed class AdvisoryServiceTests
 {
+    private static HttpResponseMessage EmptyCisa() => AdvisoryFixture.Json(new JsonObject
+    { ["count"] = 0, ["vulnerabilities"] = new JsonArray() });
+
+    [TestMethod]
+    public async Task CisaEmptyCatalogFallsBackAndRetainsCacheWhenBothSourcesAreEmpty()
+    {
+        using var fixture = new AdvisoryFixture();
+        fixture.Respond = request => request.RequestUri!.Host == "api.github.com"
+            ? AdvisoryFixture.GitHub() : AdvisoryFixture.Cisa(AdvisoryFixture.CisaEntry());
+        await fixture.Refresh();
+        var initial = fixture.Feed(AdvisorySource.CisaKev);
+        Assert.HasCount(1, initial.Items);
+        Assert.IsNull(initial.Error);
+
+        fixture.Clock.Advance(TimeSpan.FromHours(1));
+        fixture.Respond = request => request.RequestUri!.Host switch
+        {
+            "www.cisa.gov" => EmptyCisa(),
+            "raw.githubusercontent.com" => AdvisoryFixture.Cisa(AdvisoryFixture.CisaEntry(cve: "CVE-2026-9999")),
+            _ => AdvisoryFixture.GitHub()
+        };
+        await fixture.Refresh();
+        var mirror = fixture.Feed(AdvisorySource.CisaKev);
+        Assert.IsTrue(mirror.ViaMirror);
+        Assert.IsNull(mirror.Error);
+        Assert.AreEqual("CVE-2026-9999", mirror.Items.Single().CveId);
+
+        fixture.Clock.Advance(TimeSpan.FromHours(1));
+        fixture.Respond = request => request.RequestUri!.Host == "api.github.com" ? AdvisoryFixture.GitHub() : EmptyCisa();
+        await fixture.Refresh();
+        var failed = fixture.Feed(AdvisorySource.CisaKev);
+        Assert.IsNotNull(failed.Error);
+        Assert.AreEqual(mirror.LastSuccess, failed.LastSuccess);
+        Assert.AreEqual("CVE-2026-9999", failed.Items.Single().CveId);
+        Assert.AreEqual(2, fixture.Requests.Count(uri => uri.Host == "raw.githubusercontent.com"));
+    }
+
+    [TestMethod]
+    public async Task CisaCatalogWithOnlyOldEntriesSucceeds()
+    {
+        using var fixture = new AdvisoryFixture();
+        await fixture.Refresh();
+        var feed = fixture.Feed(AdvisorySource.CisaKev);
+        Assert.IsNotNull(feed.LastSuccess);
+        Assert.IsNull(feed.Error);
+        Assert.IsEmpty(feed.Items);
+        Assert.IsFalse(feed.ViaMirror);
+    }
+
+    [TestMethod]
+    [DataRow("http", "HTTP")]
+    [DataRow("timeout", "Timeout")]
+    [DataRow("parsing", "Parsing")]
+    [DataRow("rate", "Rate limit")]
+    public async Task LogsFailureCategoryRetryAndRecoveryWithoutUpstreamDetails(string failure, string category)
+    {
+        using var fixture = new AdvisoryFixture();
+        fixture.Respond = request => request.RequestUri!.Host != "api.github.com" ? AdvisoryFixture.Cisa() : failure switch
+        {
+            "http" => throw new HttpRequestException("secret response"),
+            "timeout" => throw new TaskCanceledException("secret response"),
+            "parsing" => new(HttpStatusCode.OK) { Content = new StringContent("secret response") },
+            _ => new(HttpStatusCode.TooManyRequests)
+        };
+        await fixture.Refresh();
+        var entry = fixture.Logger.Entries.Single();
+        Assert.AreEqual(LogLevel.Warning, entry.Level);
+        Assert.AreEqual(AdvisorySource.GitHub, entry.Properties["Source"]);
+        Assert.AreEqual(category, entry.Properties["Category"]);
+        Assert.AreEqual(fixture.Feed(AdvisorySource.GitHub).NextAttempt, entry.Properties["NextAttempt"]);
+        Assert.IsFalse(entry.Properties.Values.Any(value => value?.ToString()?.Contains("secret") == true));
+        await fixture.Refresh();
+        Assert.HasCount(1, fixture.Logger.Entries);
+        fixture.Clock.Advance(TimeSpan.FromHours(1));
+        fixture.Respond = request => request.RequestUri!.Host == "api.github.com" ? AdvisoryFixture.GitHub() : AdvisoryFixture.Cisa();
+        await fixture.Refresh();
+        Assert.AreEqual(LogLevel.Information, fixture.Logger.Entries.Last().Level);
+        Assert.AreEqual(AdvisorySource.GitHub, fixture.Logger.Entries.Last().Properties["Source"]);
+        Assert.HasCount(2, fixture.Logger.Entries);
+    }
     [TestMethod]
     public async Task BackgroundWorkerLoadsFeedsBeforeAnyPageRequestAndStopsCleanly()
     {

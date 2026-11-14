@@ -8,6 +8,27 @@ namespace HappyDocker.Web.Tests;
 public sealed class AdvisoryParserTests
 {
     [TestMethod]
+    [DataRow("{\"vulnerabilities\":[]}")]
+    public void CisaRejectsEmptyCatalogAndInvalidCount(string payload)
+    {
+        using var document = JsonDocument.Parse(payload);
+        var now = new ManualClock().GetUtcNow();
+        Assert.ThrowsExactly<JsonException>(() => AdvisoryParser.ParseCisa(document.RootElement, now.AddDays(-90), now));
+    }
+
+    [TestMethod]
+    public void CisaRejectsMismatchedOrInvalidDeclaredCount()
+    {
+        foreach (JsonNode count in new JsonNode[] { JsonValue.Create(2)!, JsonValue.Create("1")! })
+        {
+            var root = new JsonObject { ["count"] = count,
+                ["vulnerabilities"] = new JsonArray(AdvisoryFixture.CisaEntry()) };
+            using var document = JsonDocument.Parse(root.ToJsonString());
+            var now = new ManualClock().GetUtcNow();
+            Assert.ThrowsExactly<JsonException>(() => AdvisoryParser.ParseCisa(document.RootElement, now.AddDays(-90), now));
+        }
+    }
+    [TestMethod]
     public void CisaKeepsKnownExploitationSeparateFromSeverity()
     {
         var entry = AdvisoryFixture.CisaEntry();

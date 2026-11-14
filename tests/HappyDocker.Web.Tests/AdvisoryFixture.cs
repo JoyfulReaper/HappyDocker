@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using HappyDocker.Web.Advisories;
+using Microsoft.Extensions.Logging;
 
 namespace HappyDocker.Web.Tests;
 
@@ -14,12 +15,13 @@ internal sealed class AdvisoryFixture : IDisposable
     public Func<HttpRequestMessage, HttpResponseMessage>? Respond { get; set; }
     public Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>>? RespondAsync { get; set; }
     public AdvisoryService Service { get; }
+    public TestLogger Logger { get; } = new();
     private readonly HttpClient client;
 
     public AdvisoryFixture()
     {
         client = new HttpClient(new FeedHandler(this)) { Timeout = TimeSpan.FromSeconds(10) };
-        Service = new(new Factory(client), Clock);
+        Service = new(new Factory(client), Clock, Logger);
     }
 
     public Task Refresh() => Service.RefreshAsync(CancellationToken.None);
@@ -43,8 +45,12 @@ internal sealed class AdvisoryFixture : IDisposable
         { ["package"] = new JsonObject { ["ecosystem"] = "npm", ["name"] = "widget-package" } })
     };
 
-    public static HttpResponseMessage Cisa(params JsonObject[] entries) => Json(new JsonObject
-    { ["vulnerabilities"] = new JsonArray(entries.Select(entry => (JsonNode)entry).ToArray()) });
+    public static HttpResponseMessage Cisa(params JsonObject[] entries)
+    {
+        if (entries.Length == 0) entries = [CisaEntry(date: "2020-01-01")];
+        return Json(new JsonObject { ["count"] = entries.Length,
+            ["vulnerabilities"] = new JsonArray(entries.Select(entry => (JsonNode)entry).ToArray()) });
+    }
     public static HttpResponseMessage GitHub(params JsonObject[] entries) => Json(new JsonArray(entries.Select(entry => (JsonNode)entry).ToArray()));
     public static HttpResponseMessage Json(JsonNode node) => new(HttpStatusCode.OK)
     { Content = new StringContent(node.ToJsonString(), Encoding.UTF8, "application/json") };
@@ -81,6 +87,15 @@ internal sealed class AdvisoryFixture : IDisposable
             return client;
         }
     }
+}
+
+internal sealed class TestLogger : ILogger<AdvisoryService>
+{
+    public ConcurrentQueue<(LogLevel Level, IReadOnlyDictionary<string, object?> Properties)> Entries { get; } = new();
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    public bool IsEnabled(LogLevel logLevel) => true;
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        => Entries.Enqueue((logLevel, ((IEnumerable<KeyValuePair<string, object?>>)(object)state!).ToDictionary(pair => pair.Key, pair => pair.Value)));
 }
 
 internal sealed class ManualClock : TimeProvider

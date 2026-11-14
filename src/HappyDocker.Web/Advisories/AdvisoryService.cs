@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.WebUtilities;
 
 namespace HappyDocker.Web.Advisories;
 
-public sealed class AdvisoryService(IHttpClientFactory clients, TimeProvider clock)
+public sealed class AdvisoryService(IHttpClientFactory clients, TimeProvider clock, ILogger<AdvisoryService> logger)
 {
     public const string ClientName = "SecurityAdvisories";
     public const int LookbackDays = 90;
@@ -63,16 +63,23 @@ public sealed class AdvisoryService(IHttpClientFactory clients, TimeProvider clo
         catch (FeedException exception)
         {
             next = previous with { LastAttempt = now, NextAttempt = Later(now.AddHours(1), exception.RetryAt), Error = exception.Message };
+            logger.LogWarning("Advisory refresh failed for {Source}: {Category}; next retry at {NextAttempt}",
+                previous.Source, exception.Category, next.NextAttempt);
         }
         catch (Exception exception) when (exception is HttpRequestException or IOException or JsonException or OperationCanceledException)
         {
             next = previous with { LastAttempt = now, NextAttempt = now.AddHours(1),
                 Error = exception is JsonException ? "The feed returned invalid data." : "The feed is unavailable or timed out." };
+            string category = exception is JsonException ? "Parsing" : exception is OperationCanceledException ? "Timeout" : "HTTP";
+            logger.LogWarning("Advisory refresh failed for {Source}: {Category}; next retry at {NextAttempt}",
+                previous.Source, category, next.NextAttempt);
         }
         lock (stateLock)
         {
             if (previous.Source == AdvisorySource.CisaKev) cisa = next; else github = next;
         }
+        if (previous.Error is not null && next.Error is null)
+            logger.LogInformation("Advisory refresh recovered for {Source}; next refresh at {NextAttempt}", previous.Source, next.NextAttempt);
     }
 
     private sealed record FetchResult(IReadOnlyList<AdvisoryItem> Items, int Skipped, bool Limited = false, bool ViaMirror = false);
@@ -145,9 +152,9 @@ public sealed class AdvisoryService(IHttpClientFactory clients, TimeProvider clo
                 if (response.Headers.TryGetValues("X-RateLimit-Reset", out var values)
                     && long.TryParse(values.FirstOrDefault(), out long seconds) && seconds is >= 0 and <= 253402300799)
                     retry = Later(retry, DateTimeOffset.FromUnixTimeSeconds(seconds));
-                throw new FeedException("The feed is rate limited; cached data is retained.", retry);
+                throw new FeedException("The feed is rate limited; cached data is retained.", retry, "Rate limit");
             }
-            throw new FeedException("The feed is unavailable; cached data is retained.");
+            throw new FeedException("The feed is unavailable; cached data is retained.", category: "HTTP");
         }
     }
 
@@ -195,8 +202,9 @@ public sealed class AdvisoryService(IHttpClientFactory clients, TimeProvider clo
 
     private static DateTimeOffset Later(DateTimeOffset first, DateTimeOffset? second) => second > first ? second.Value : first;
 
-    private sealed class FeedException(string message, DateTimeOffset? retryAt = null) : Exception(message)
+    private sealed class FeedException(string message, DateTimeOffset? retryAt = null, string category = "Parsing") : Exception(message)
     {
         public DateTimeOffset? RetryAt { get; } = retryAt;
+        public string Category { get; } = category;
     }
 }

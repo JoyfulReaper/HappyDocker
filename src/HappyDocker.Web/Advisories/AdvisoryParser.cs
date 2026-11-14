@@ -11,7 +11,10 @@ public static class AdvisoryParser
     public static ParsedAdvisories ParseCisa(JsonElement root, DateTimeOffset cutoff, DateTimeOffset now)
     {
         if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("vulnerabilities", out var entries)
-            || entries.ValueKind != JsonValueKind.Array || entries.GetArrayLength() > 25000)
+            || entries.ValueKind != JsonValueKind.Array || entries.GetArrayLength() is 0 or > 25000
+            || root.TryGetProperty("count", out var count) &&
+                (count.ValueKind != JsonValueKind.Number || !count.TryGetInt32(out int declaredCount)
+                    || declaredCount != entries.GetArrayLength()))
             throw new JsonException("Invalid KEV catalog.");
         var items = new List<AdvisoryItem>();
         int skipped = 0;
