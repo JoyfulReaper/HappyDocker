@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "hostId": "clanker",
+  "reportId": "7eac05eb-3074-4264-826e-a05413640c67",
+  "scannedAt": "2026-11-01T12:00:00Z",
+  "status": "partial",
+  "findings": [
+    {
+      "kind": "versionCandidate",
+      "containerName": "nats",
+      "containerId": "example-container-id",
+      "imageId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repository": "docker.io/library/nats",
+      "configuredImage": "nats:2.14.8-alpine",
+      "configuredTag": "2.14.8-alpine",
+      "deployedDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "available": "3.0.0-alpine",
+      "platformVerified": false,
+      "platform": "linux/amd64",
+      "verifiedAlternative": "2.15.0-alpine",
+      "state": "new",
+      "observedAt": "2026-11-01T12:00:00Z",
+      "upgrade": "major",
+      "alternativeUpgrade": "minor"
+    }
+  ]
+}

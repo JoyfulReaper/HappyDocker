@@ -1,0 +1,94 @@
+@page "/security/advisories"
+@model HappyDocker.Web.Pages.Security.AdvisoriesModel
+@using HappyDocker.Web.Advisories
+@{ Layout = null; }
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HappyDocker · Security advisories</title>
+    <link rel="stylesheet" href="~/site.css" asp-append-version="true" />
+</head>
+<body>
+<main class="advisories-page">
+    <header>
+        <a class="brand" href="/">HappyDocker<span class="brand-dot">●</span></a>
+        <nav aria-label="Main navigation"><a href="/">Fleet overview</a><a href="/security/advisories" aria-current="page">Security advisories</a></nav>
+    </header>
+    <div class="intro">
+        <p class="eyebrow">SECURITY INTELLIGENCE</p>
+        <h1>Security advisories.<br /><span>A wider view.</span></h1>
+        <p>Recent CISA known exploited vulnerabilities and GitHub High / Critical advisories.</p>
+    </div>
+    <aside class="advisory-boundary"><strong>General security information.</strong> These advisories are not matched to your containers or VPS infrastructure and do not establish that any of your systems are affected. Vulnerability scanning is still planned.</aside>
+    <div class="feed-status-grid" aria-label="Feed refresh status">
+    @foreach (var feed in Model.Snapshot.Feeds)
+    {
+        <section class="feed-status">
+            <div class="section-heading"><h2>@HappyDocker.Web.Pages.Security.AdvisoriesModel.SourceName(feed.Source)</h2><span class="@(feed.IsStale(Model.Snapshot.CapturedAt) ? "unverified" : "verified")">@(feed.LastSuccess is null ? "Not loaded" : feed.IsStale(Model.Snapshot.CapturedAt) ? "Stale cache" : "Current cache")</span></div>
+            <p>Last successful refresh: @if (feed.LastSuccess is { } refreshed) { <time datetime="@refreshed.ToString("O")">@refreshed.ToString("yyyy-MM-dd HH:mm:ss 'UTC'")</time> } else { <span>Never</span> }</p>
+            @if (feed.Error is not null) { <p class="feed-warning">@feed.Error</p> }
+            else if (feed.LastSuccess is null) { <p>The background refresh is pending. Reload this page shortly.</p> }
+            @if (feed.ViaMirror) { <p>Retrieved from CISA’s official GitHub mirror.</p> }
+            @if (feed.Limited) { <p class="feed-warning">The feed reached its result limit. This is a recent subset, not a complete catalog.</p> }
+            @if (feed.Skipped > 0) { <p class="feed-warning">@feed.Skipped invalid or unsupported records were omitted.</p> }
+        </section>
+    }
+    </div>
+    <form method="get" class="advisory-filters" aria-label="Filter security advisories">
+        <div class="filter-search"><label asp-for="Search">Search advisories</label><input asp-for="Search" type="search" maxlength="200" placeholder="CVE, title, product or package" /></div>
+        <div>
+            <label asp-for="Severity">Severity</label>
+            <select asp-for="Severity">
+                <option value="">All severities</option>
+                <option value="critical">Critical (GitHub)</option>
+                <option value="high">High (GitHub)</option>
+                <option value="unknown">Not reported</option>
+            </select>
+        </div>
+        <div><label asp-for="Source">Source</label><select asp-for="Source"><option value="">All sources</option><option value="cisa">CISA KEV</option><option value="github">GitHub</option></select></div>
+        <div><label asp-for="From">From (UTC)</label><input asp-for="From" type="date" /></div>
+        <div><label asp-for="To">Through (UTC)</label><input asp-for="To" type="date" /></div>
+        <div class="filter-actions"><button type="submit">Apply filters</button><a href="/security/advisories">Reset</a></div>
+        <div asp-validation-summary="All" class="filter-errors" role="alert"></div>
+    </form>
+    <div class="section-heading"><h2>Recent advisories</h2><span>@Model.Results.Count shown · @Model.MatchCount matching</span></div>
+    <p class="advisory-scope">Past @AdvisoryService.LookbackDays days, newest first · Up to @HappyDocker.Web.Pages.Security.AdvisoriesModel.MaximumDisplayed results · Dates are publication dates (GitHub) or dates added (CISA).</p>
+    @if (Model.MatchCount > Model.Results.Count)
+    {
+        <p class="advisory-limit">Showing the newest @Model.Results.Count matching entries. Narrow the filters to see other cached results.</p>
+    }
+    @if (!ViewData.ModelState.IsValid)
+    {
+        <section class="empty"><h3>Check your filters</h3><p>Correct the highlighted values to search the cached advisories.</p></section>
+    }
+    else if (Model.Results.Count == 0)
+    {
+        <section class="empty"><h3>@(Model.Snapshot.Feeds.All(feed => feed.LastSuccess is null) ? "No advisory data available yet" : Model.Snapshot.Advisories.Count == 0 ? "No recent advisories in the cache" : "No matching advisories")</h3><p>@(Model.Snapshot.Feeds.All(feed => feed.LastSuccess is null) ? "The feeds may be loading or unavailable. Check the source status above; this is not an assessment of your infrastructure." : "Try a broader search or date range. A source outage may also limit the available results.")</p></section>
+    }
+    <div class="advisory-list">
+    @foreach (var advisory in Model.Results)
+    {
+        <article class="advisory-card" aria-label="Advisory @advisory.Key">
+            <div class="advisory-meta"><strong class="advisory-id">@(advisory.CveId ?? advisory.Key)</strong>
+                <span class="severity severity-@(advisory.Severity ?? "unknown")">@(advisory.Severity is null ? "Severity not reported" : $"{System.Globalization.CultureInfo.InvariantCulture.TextInfo.ToTitleCase(advisory.Severity)} · GitHub")</span>
+                @if (advisory.KnownExploited) { <span class="exploited">Known exploited · CISA KEV</span> }
+            </div>
+            @if (advisory.CveId is null) { <p class="detail">No CVE identifier assigned in the source record.</p> }
+            <h3>@advisory.Title</h3>
+            <p class="advisory-description">@advisory.Description</p>
+            <p class="advisory-products"><strong>Product / package:</strong> @(advisory.Products.Any() ? string.Join(", ", advisory.Products) : "Not provided by the source")</p>
+            <ul class="advisory-sources" aria-label="Advisory sources">
+            @foreach (var item in advisory.Items)
+            {
+                <li><a href="@item.Link.AbsoluteUri" rel="noreferrer noopener">@(item.Source == AdvisorySource.CisaKev ? "CISA KEV catalog" : item.SourceId)</a><span>@HappyDocker.Web.Pages.Security.AdvisoriesModel.SourceName(item.Source) · @(item.Source == AdvisorySource.CisaKev ? "Added" : "Published") <time datetime="@item.PublishedAt.ToString("O")">@item.PublishedAt.ToString("yyyy-MM-dd")</time></span></li>
+            }
+            </ul>
+        </article>
+    }
+    </div>
+    <footer>Known exploitation and severity are different signals. CISA KEV does not supply a severity here; any displayed severity comes from GitHub. Sources refresh approximately hourly. Cached data is held in memory and resets when the web application restarts.</footer>
+</main>
+</body>
+</html>

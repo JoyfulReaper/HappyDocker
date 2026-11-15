@@ -1,0 +1,81 @@
+@page
+@model IndexModel
+@{ Layout = null; }
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HappyDocker · Fleet overview</title>
+    <link rel="stylesheet" href="~/site.css" asp-append-version="true" />
+</head>
+<body>
+<main>
+    <header>
+        <a class="brand" href="/">HappyDocker<span class="brand-dot">●</span></a>
+        <nav aria-label="Main navigation"><a href="/" aria-current="page">Fleet overview</a><a href="/security/advisories">Security advisories</a></nav>
+    </header>
+    <div class="intro">
+        <p class="eyebrow">FLEET OVERVIEW</p>
+        <h1>Know what’s running.<br /><span>See what’s next.</span></h1>
+        <p>Image update findings reported by your hosts. Refresh this page for the latest received state.</p>
+    </div>
+    <div class="summary" aria-label="Fleet summary">
+        <div><strong>@Model.Hosts.Count</strong><span>Registered / reporting hosts</span></div>
+        <div><strong>@Model.Hosts.Count(host => host.LatestReport is not null)</strong><span>Hosts with reports</span></div>
+        <div><strong>@Model.OutstandingCount</strong><span>Outstanding update findings</span></div>
+    </div>
+    <div class="section-heading"><h2>Your hosts</h2><span>Private infrastructure</span></div>
+    @if (Model.Hosts.Count == 0)
+    {
+        <section class="empty"><h3>No agents configured</h3><p>Register a host and its unique token in the server configuration to begin receiving reports.</p></section>
+    }
+    @foreach (var host in Model.Hosts)
+    {
+        var outstanding = host.Findings.Where(finding => finding.State != FindingState.Resolved).ToArray();
+        <section class="host" aria-label="Host @host.HostId">
+            <div class="host-heading">
+                <div><h3>@host.HostId</h3><p>Last received: @if (host.ReceivedAt is { } received) { <time datetime="@received.ToString("O")">@received.ToString("yyyy-MM-dd HH:mm:ss 'UTC'")</time> } else { <span>Never</span> }</p></div>
+                <span class="status status-@host.LatestReport?.Status.ToString().ToLowerInvariant()">@(host.LatestReport?.Status.ToString() ?? "Awaiting report")</span>
+            </div>
+            @if (host.LatestReport is null)
+            {
+                <div class="host-message"><h4>No reports yet</h4><p>This host is registered and waiting for its first authorized report.</p></div>
+            }
+            else
+            {
+                <p class="scan-time">Latest scan: <time datetime="@host.LatestReport.ScannedAt.ToString("O")">@host.LatestReport.ScannedAt.ToString("yyyy-MM-dd HH:mm:ss 'UTC'")</time></p>
+                @if (host.LatestReport.Status != FindingRunStatus.Complete)
+                {
+                    <p class="notice">@host.LatestReport.Status scan: previously known findings are retained. Missing findings do not prove resolution; this host may have unchecked or deferred work.</p>
+                }
+                @if (outstanding.Length == 0)
+                {
+                    <div class="host-message"><h4>No outstanding findings@(host.LatestReport.Status == FindingRunStatus.Complete ? "" : " known")</h4><p>@(host.LatestReport.Status == FindingRunStatus.Complete ? "The latest complete snapshot contains no active update findings." : "The scan is incomplete. No known updates does not mean all checks succeeded.")</p></div>
+                }
+                else
+                {
+                    <div class="table-scroll"><table>
+                        <caption class="visually-hidden">Outstanding update findings for @host.HostId</caption>
+                        <thead><tr><th>Container / repository</th><th>Deployed</th><th>Available</th><th>Upgrade / state</th><th>Platform evidence</th></tr></thead>
+                        <tbody>
+                        @foreach (var finding in outstanding)
+                        {
+                            <tr>
+                                <td><strong>@finding.ContainerName</strong><code>@finding.Repository</code><span class="detail">@(finding.Kind == FindingKind.MutableTag ? "Mutable tag" : "Version candidate")</span></td>
+                                <td><code>@(finding.ConfiguredTag ?? "Unknown tag")</code>@if (finding.DeployedDigest is not null) { <code class="digest">@finding.DeployedDigest</code> }@if (finding.ConfiguredImage is not null) { <span class="detail">@finding.ConfiguredImage</span> }</td>
+                                <td><code class="digest">@finding.Available</code>@if (finding.VerifiedAlternative is not null) { <span class="detail">Verified alternative: @finding.VerifiedAlternative (@finding.AlternativeUpgrade)</span> }</td>
+                                <td><span class="upgrade">@(finding.Upgrade?.ToString() ?? "Tag changed")</span><span class="detail">@finding.State</span></td>
+                                <td><span class="@(finding.PlatformVerified ? "verified" : "unverified")">@(finding.PlatformVerified ? "Verified" : "Unverified candidate")</span><span class="detail">@(finding.Platform ?? "Platform unspecified")</span><span class="detail">Observed @finding.ObservedAt.ToString("yyyy-MM-dd HH:mm:ss 'UTC'")</span></td>
+                            </tr>
+                        }
+                        </tbody>
+                    </table></div>
+                }
+            }
+        </section>
+    }
+    <footer>Updates require application review. Platform verification does not establish compatibility. Vulnerability scanning is planned.</footer>
+</main>
+</body>
+</html>
